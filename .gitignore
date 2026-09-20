@@ -1,0 +1,15 @@
+.venv/
+.env
+config.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+
+# Local bundled runtime; distribute this separately if needed.
+.python-runtime/
+python-runtime.zip
+
+# Generated local UI verification image.
+result-ui-check.png

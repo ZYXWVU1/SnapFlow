@@ -1,0 +1,1 @@
+"""AI Screenshot Helper."""

@@ -1,0 +1,255 @@
+﻿"""Coordinate capture, background requests, and the tray lifecycle."""
+import os
+from dotenv import load_dotenv
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
+from PySide6.QtGui import QActionGroup, QCursor, QIcon, QImage
+from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QStyle
+from src.config import Config, ROOT, load_config, save_config
+from src.hotkeys import Hotkeys
+from src.llm_client import AnalysisError, LLMClient
+from src.prompts import MODES
+from src.screenshot import capture_screen, image_to_png_bytes, resize_if_needed
+from src.ui.result_window import ResultWindow
+from src.ui.selection_overlay import SelectionOverlay
+from src.ui.settings_window import SettingsWindow
+
+
+class WorkerSignals(QObject):
+    finished = Signal(int, str, bool)
+
+
+class AnalysisWorker(QRunnable):
+    def __init__(self, request_id: int, client: LLMClient, data: bytes, mode: str, question: str) -> None:
+        super().__init__()
+        self.signals = WorkerSignals()
+        self.request_id, self.client, self.data = request_id, client, data
+        self.mode, self.question = mode, question
+
+    def run(self) -> None:
+        try:
+            text = self.client.analyze_image(self.data, self.mode, self.question)
+            error = False
+        except AnalysisError as exc:
+            text, error = str(exc), True
+        except Exception:
+            text, error = "An unexpected analysis error occurred. Please try again.", True
+        finally:
+            self.data = b""
+        self.signals.finished.emit(self.request_id, text, error)
+
+
+class ApplicationController(QObject):
+    def __init__(self, app: QApplication, preview: bool = False) -> None:
+        super().__init__()
+        self.app, self.preview = app, preview
+        load_dotenv(ROOT / ".env")
+        warning = ""
+        try:
+            self.config = load_config()
+        except ValueError as exc:
+            self.config, warning = Config(), str(exc)
+        self.mode = self.config.default_mode
+        self.client = LLMClient()
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(1)
+        self.workers: dict[int, AnalysisWorker] = {}
+        self.request_id = 0
+        self.image_bytes = b""
+        self.overlays: list[SelectionOverlay] = []
+        self.capturing = False
+        self.quitting = False
+        self.settings: SettingsWindow | None = None
+        self.result = ResultWindow(self.mode, self.config.always_on_top)
+        self.result.ask.connect(self.analyze)
+        self.result.mode_changed.connect(self.change_mode)
+        self.result.closed.connect(self.discard_result)
+        self.result.settings_requested.connect(self.open_settings)
+        icon = QIcon(str(ROOT / "assets" / "icon.ico"))
+        if icon.isNull():
+            icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        app.setWindowIcon(icon)
+        self.tray = QSystemTrayIcon(icon, self)
+        self.tray.setToolTip("AI Screenshot Helper")
+        self.menu = QMenu()
+        self.capture_action = self.menu.addAction("Capture Screenshot", self.capture)
+        self.menu.addSeparator()
+        mode_menu = self.menu.addMenu("Mode")
+        self.mode_group = QActionGroup(self)
+        self.mode_actions = {}
+        for value, label in MODES.items():
+            action = mode_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(value == self.mode)
+            action.triggered.connect(lambda checked=False, mode=value: self.change_mode(mode))
+            self.mode_group.addAction(action)
+            self.mode_actions[value] = action
+        self.menu.addAction("Settings", self.open_settings)
+        self.menu.addSeparator()
+        self.menu.addAction("Quit", self.quit)
+        self.tray.setContextMenu(self.menu)
+        self.tray.activated.connect(self.tray_activated)
+        self.tray.show()
+        self.hotkeys = Hotkeys(app)
+        self.hotkeys.triggered.connect(self.capture)
+        try:
+            self.hotkeys.register(self.config.hotkey)
+        except ValueError as exc:
+            warning += "\n" + str(exc)
+        app.aboutToQuit.connect(self.hotkeys.close)
+        if warning:
+            QTimer.singleShot(0, lambda: self.show_error(warning.strip()))
+        elif not os.getenv("AI_API_KEY") and not preview:
+            self.tray.showMessage("AI Screenshot Helper", "Ready. Open Settings to add your API key.")
+
+    def tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.capture()
+
+    def capture(self) -> None:
+        if self.capturing or self.workers or self.quitting:
+            return
+        self.capturing = True
+        self.result.hide()
+        if self.settings:
+            self.settings.hide()
+        QTimer.singleShot(180, self.begin_selection)
+
+    def begin_selection(self) -> None:
+        if self.quitting:
+            return
+        try:
+            snapshots = [(screen, capture_screen(screen)) for screen in self.app.screens()]
+            if not snapshots:
+                raise RuntimeError("No displays are available.")
+            active = self.app.screenAt(QCursor.pos())
+            for screen, image in snapshots:
+                overlay = SelectionOverlay(screen, image)
+                overlay.selected.connect(self.selected)
+                overlay.cancelled.connect(self.cancel_selection)
+                self.overlays.append(overlay)
+                overlay.show()
+            for overlay, (screen, _) in zip(self.overlays, snapshots):
+                if screen == active:
+                    overlay.activateWindow()
+                    overlay.setFocus()
+        except Exception:
+            self.clear_overlays()
+            self.show_error("Unable to capture the desktop. Try again on an unlocked display.")
+
+    def clear_overlays(self) -> None:
+        for overlay in self.overlays:
+            overlay.close()
+            overlay.deleteLater()
+        self.overlays.clear()
+        self.capturing = False
+
+    def cancel_selection(self) -> None:
+        self.clear_overlays()
+        if self.image_bytes:
+            self.result.show()
+
+    def selected(self, image: QImage) -> None:
+        self.clear_overlays()
+        try:
+            image = resize_if_needed(image, self.config.max_image_width)
+            self.image_bytes = image_to_png_bytes(image)
+        except ValueError as exc:
+            self.show_error(str(exc))
+            return
+        self.result.show()
+        self.result.raise_()
+        if self.preview:
+            self.result.show_preview(image)
+        else:
+            self.analyze()
+
+    def analyze(self, question: str = "") -> None:
+        if not self.image_bytes or self.workers or self.preview or self.quitting:
+            return
+        self.request_id += 1
+        worker = AnalysisWorker(self.request_id, self.client, self.image_bytes, self.mode, question)
+        worker.signals.finished.connect(self.analysis_finished)
+        self.workers[self.request_id] = worker
+        self.result.set_busy()
+        self.capture_action.setEnabled(False)
+        self.mode_group.setEnabled(False)
+        self.pool.start(worker)
+
+    @Slot(int, str, bool)
+    def analysis_finished(self, request_id: int, text: str, error: bool) -> None:
+        self.workers.pop(request_id, None)
+        self.capture_action.setEnabled(not self.quitting)
+        self.mode_group.setEnabled(True)
+        if self.quitting:
+            QTimer.singleShot(0, self.finish_quit)
+        elif request_id == self.request_id:
+            self.result.set_response(text, error)
+
+    def discard_result(self) -> None:
+        self.image_bytes = b""
+        self.request_id += 1
+
+    def change_mode(self, mode: str) -> None:
+        self.mode = mode
+        self.mode_actions[mode].setChecked(True)
+        self.result.mode.blockSignals(True)
+        self.result.mode.setCurrentIndex(self.result.mode.findData(mode))
+        self.result.mode.blockSignals(False)
+        if self.image_bytes and not self.workers:
+            self.analyze()
+
+    def open_settings(self) -> None:
+        if self.settings and self.settings.isVisible():
+            self.settings.raise_()
+            return
+        if self.settings:
+            self.settings.deleteLater()
+        self.settings = SettingsWindow(self.config)
+        self.settings.submitted.connect(self.apply_settings)
+        self.settings.show()
+
+    def apply_settings(self, config: Config, key: str) -> None:
+        previous = self.config
+        try:
+            self.hotkeys.register(config.hotkey)
+            try:
+                save_config(config)
+            except OSError:
+                self.hotkeys.register(previous.hotkey)
+                raise
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self.settings, "Unable to save settings", str(exc))
+            return
+        self.config = config
+        if key:
+            os.environ["AI_API_KEY"] = key
+        visible = self.result.isVisible()
+        self.result.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, config.always_on_top)
+        if visible:
+            self.result.show()
+        self.settings.key.clear()
+        self.settings.accept()
+        self.change_mode(config.default_mode)
+
+    def show_error(self, message: str) -> None:
+        self.result.set_response(message, error=True)
+        self.result.show()
+
+    def quit(self) -> None:
+        self.quitting = True
+        self.hotkeys.close()
+        self.clear_overlays()
+        self.image_bytes = b""
+        if self.settings:
+            self.settings.close()
+        if self.workers:
+            self.result.set_response("Finishing the current request before quitting...", error=True)
+            self.result.show()
+            self.capture_action.setEnabled(False)
+        else:
+            self.finish_quit()
+
+    def finish_quit(self) -> None:
+        self.pool.waitForDone()
+        self.tray.hide()
+        self.app.quit()
