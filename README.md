@@ -8,11 +8,20 @@ A small Windows 10/11 utility: press **Ctrl+Shift+S**, select a screen region, a
 - Drag selection on any display, bright selection preview, Esc cancellation.
 - In-memory PNG capture with display scaling correction and optional downscaling.
 - Background vision requests with loading state and readable errors.
-- General, Explain, Debug Code, Translate, Summarize, and Extract Text modes.
-- Resizable result popup with Copy, Ask Again, Settings, and Close.
+- Ask, Debug, Extract, Explain, and Translate modes.
+- Ask conversation, structured diagnostics, and extracted tables/code/fields with contextual copy buttons.
 - Tray menu, configurable always-on-top behavior, and JSON settings.
 
 ## Demo
+
+### Phase 1 workflows
+
+- **Ask:** free-form answers with an inline follow-up field. The last six conversation turns stay in memory for the current screenshot. Retry starts a fresh conversation; replacing or closing the screenshot clears it.
+- **Debug:** separate Detected Problem, Evidence, Likely Cause, Suggested Fix, and Confidence sections. Copy Error and (when a fix exists) Copy Fix copy locally. Ask AI and Explain Why continue in Ask with the diagnostic as context.
+- **Extract:** identifies text, code, table, receipt, contact, event, assignment, JSON, or URL. Tables use a grid with CSV/JSON/Markdown copy actions; code uses a monospace view and Copy Code; other types show extracted fields. Nothing is executed or sent to another app by copy actions.
+- **Explain / Translate:** retain their existing text workflows for later phases.
+
+Malformed structured answers show a retryable error instead of guessed data. Old General and Summarize settings migrate to Ask; Extract Text migrates to Extract. Smart classification and external integrations are deferred.
 
 `Ctrl+Shift+S → drag over a paragraph/code/error → release → answer → Copy`
 
@@ -93,6 +102,9 @@ Settings supports combinations of Ctrl, Alt, Shift, Win and a letter or number. 
 | `src/screenshot.py` | Screen snapshots, logical-to-physical crop, resize, PNG encoding |
 | `src/llm_client.py` | Provider-specific requests, credentials, error mapping |
 | `src/prompts.py` | Central mode labels and prompts |
+| `src/modes.py` | Debug/Extract contracts, result model, and JSON validation |
+| `src/actions.py` | Local clipboard representations (CSV, JSON, Markdown, code, fixes) |
+| `src/ui/structured_result.py` | Diagnostic sections and extracted tables/code/fields |
 | `src/ui/` | Selection, results, settings widgets |
 | `tests/` | Offline unit and Qt integration tests |
 
@@ -111,8 +123,8 @@ The smoke check starts the real application, registers the hotkey and tray, then
 Manual acceptance checklist:
 
 1. Run `--preview`; capture a known rectangle on each display at its normal scaling. Confirm correct pixels and Esc cancellation.
-2. Configure a real key and capture a paragraph, Python code, an error, and a math question. Check the answers and all six modes.
-3. Try Ask Again and Copy. Close while analyzing; confirm the popup stays closed.
+2. Configure a real key and capture a paragraph, Python code, an error, and a table. Compare Ask, Debug, and Extract on the same screenshot; check Explain and Translate too.
+3. Try follow-up questions, Retry, and contextual copy actions. Close while analyzing; confirm the popup stays closed.
 4. Change the hotkey, restart, and confirm persistence. Test a shortcut already used by another app.
 5. Disconnect the network and check the readable error. Quit during a request.
 
@@ -121,10 +133,11 @@ Manual acceptance checklist:
 - Selection stays within one display; cross-monitor drags are clipped to the starting display.
 - Protected content, secure desktops, and some exclusive full-screen applications may not be capturable.
 - Requests use a 45-second network timeout and no automatic retries. Closing a result suppresses the answer but cannot retract a submitted request. A new capture waits for the active request to finish.
-- Ask Again sends the original image and a new question, without conversation history.
+- Ask follow-ups resend the original image with up to six previous turns. This context is kept only in memory.
+- JSON structure is validated locally; factual accuracy and confidence remain dependent on the configured vision model. Large responses may exceed AI_MAX_TOKENS and require a smaller capture or a higher configured limit.
 - No streaming, installer, auto-start, or automatic updates in this MVP.
 - Automated tests use a mocked AI service. Real model recognition and physical multi-monitor/hotkey interaction still require the manual checks above.
 
 ## Roadmap
 
-First complete the real-key acceptance checks on Windows 10 and 11, including mixed-DPI displays. Then consider a packaged executable and streaming responses. History, annotation, and local OCR are future options, outside this MVP.
+Next validate these three workflows with representative screenshots on the configured vision model. Then add Phase 2's independent Smart classifier/router for assignment, event, code_error, table, and unknown, with a confidence threshold and Ask fallback. Spatial explanations and translation overlays come later.

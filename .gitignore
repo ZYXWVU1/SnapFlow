@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+docs/
 
 # Local bundled runtime; distribute this separately if needed.
 .python-runtime/

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon,
 from src.config import Config, ROOT, load_config, save_config
 from src.hotkeys import Hotkeys
 from src.llm_client import AnalysisError, LLMClient
+from src.modes import ModeResult, ResponseFormatError, parse_result
 from src.prompts import MODES
 from src.screenshot import capture_screen, image_to_png_bytes, resize_if_needed
 from src.ui.result_window import ResultWindow
@@ -15,21 +16,27 @@ from src.ui.settings_window import SettingsWindow
 
 
 class WorkerSignals(QObject):
-    finished = Signal(int, str, bool)
+    finished = Signal(int, object, bool)
 
 
 class AnalysisWorker(QRunnable):
-    def __init__(self, request_id: int, client: LLMClient, data: bytes, mode: str, question: str) -> None:
+    def __init__(self, request_id: int, client: LLMClient, data: bytes, mode: str, question: str,
+                 history: list[dict[str, str]] | None = None) -> None:
         super().__init__()
         self.signals = WorkerSignals()
         self.request_id, self.client, self.data = request_id, client, data
         self.mode, self.question = mode, question
+        self.history = list(history or [])
 
     def run(self) -> None:
         try:
-            text = self.client.analyze_image(self.data, self.mode, self.question)
+            if self.history:
+                text = self.client.analyze_image(self.data, self.mode, self.question, history=self.history)
+            else:
+                text = self.client.analyze_image(self.data, self.mode, self.question)
+            text = parse_result(self.mode, text)
             error = False
-        except AnalysisError as exc:
+        except (AnalysisError, ResponseFormatError) as exc:
             text, error = str(exc), True
         except Exception:
             text, error = "An unexpected analysis error occurred. Please try again.", True
@@ -55,12 +62,16 @@ class ApplicationController(QObject):
         self.workers: dict[int, AnalysisWorker] = {}
         self.request_id = 0
         self.image_bytes = b""
+        self.ask_history: list[dict[str, str]] = []
+        self.last_result: ModeResult | None = None
+        self.failed_question: str | None = None
         self.overlays: list[SelectionOverlay] = []
         self.capturing = False
         self.quitting = False
         self.settings: SettingsWindow | None = None
         self.result = ResultWindow(self.mode, self.config.always_on_top)
         self.result.ask.connect(self.analyze)
+        self.result.ask_ai.connect(self.ask_about_result)
         self.result.mode_changed.connect(self.change_mode)
         self.result.closed.connect(self.discard_result)
         self.result.settings_requested.connect(self.open_settings)
@@ -150,6 +161,10 @@ class ApplicationController(QObject):
 
     def selected(self, image: QImage) -> None:
         self.clear_overlays()
+        self.ask_history.clear()
+        self.last_result = None
+        self.failed_question = None
+        self.result.followup.clear()
         try:
             image = resize_if_needed(image, self.config.max_image_width)
             self.image_bytes = image_to_png_bytes(image)
@@ -166,8 +181,12 @@ class ApplicationController(QObject):
     def analyze(self, question: str = "") -> None:
         if not self.image_bytes or self.workers or self.preview or self.quitting:
             return
+        if not question and self.failed_question is not None:
+            question = self.failed_question
+        self.failed_question = None
         self.request_id += 1
-        worker = AnalysisWorker(self.request_id, self.client, self.image_bytes, self.mode, question)
+        worker = AnalysisWorker(self.request_id, self.client, self.image_bytes, self.mode, question,
+                                self.ask_history if self.mode == 'ask' and question.strip() else None)
         worker.signals.finished.connect(self.analysis_finished)
         self.workers[self.request_id] = worker
         self.result.set_busy()
@@ -175,27 +194,61 @@ class ApplicationController(QObject):
         self.mode_group.setEnabled(False)
         self.pool.start(worker)
 
-    @Slot(int, str, bool)
-    def analysis_finished(self, request_id: int, text: str, error: bool) -> None:
-        self.workers.pop(request_id, None)
+    @Slot(int, object, bool)
+    def analysis_finished(self, request_id: int, text: ModeResult | str, error: bool) -> None:
+        worker = self.workers.pop(request_id, None)
         self.capture_action.setEnabled(not self.quitting)
         self.mode_group.setEnabled(True)
         if self.quitting:
             QTimer.singleShot(0, self.finish_quit)
         elif request_id == self.request_id:
-            self.result.set_response(text, error)
+            if error:
+                self.failed_question = worker.question
+                self.last_result = None
+                self.result.set_response(text, True)
+            else:
+                self.last_result = text
+                conversation = None
+                if text.mode == 'ask':
+                    if not worker.question.strip():
+                        self.ask_history.clear()
+                    self.ask_history.extend([
+                        {'role': 'user', 'content': worker.question.strip() or 'Explain this screenshot.'},
+                        {'role': 'assistant', 'content': text.text},
+                    ])
+                    self.ask_history = self.ask_history[-12:]
+                    conversation = text.text if len(self.ask_history) == 2 else '\n\n'.join(
+                        ('You: ' if message['role'] == 'user' else 'AI: ') + message['content']
+                        for message in self.ask_history)
+                self.result.set_result(text, conversation)
+
+    def ask_about_result(self, question: str = '') -> None:
+        if self.workers or not self.image_bytes:
+            return
+        if self.last_result:
+            self.ask_history = [
+                {'role': 'user', 'content': 'Analyze this screenshot.'},
+                {'role': 'assistant', 'content': self.last_result.text},
+            ]
+        self.change_mode('ask', analyze=False)
+        self.analyze(question or 'Explain the extracted information in this screenshot.')
 
     def discard_result(self) -> None:
         self.image_bytes = b""
+        self.ask_history.clear()
+        self.last_result = None
+        self.failed_question = None
+        self.result.followup.clear()
         self.request_id += 1
 
-    def change_mode(self, mode: str) -> None:
+    def change_mode(self, mode: str, analyze: bool = True) -> None:
+        self.failed_question = None
         self.mode = mode
         self.mode_actions[mode].setChecked(True)
         self.result.mode.blockSignals(True)
         self.result.mode.setCurrentIndex(self.result.mode.findData(mode))
         self.result.mode.blockSignals(False)
-        if self.image_bytes and not self.workers:
+        if analyze and self.image_bytes and not self.workers:
             self.analyze()
 
     def open_settings(self) -> None:

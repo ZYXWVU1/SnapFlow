@@ -3,7 +3,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from src.prompts import MODES
+from src.prompts import MODES, ALIASES
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.json"
@@ -25,11 +25,13 @@ def parse_hotkey(value: str) -> tuple[int, int]:
 @dataclass(frozen=True)
 class Config:
     hotkey: str = "ctrl+shift+s"
-    default_mode: str = "general"
+    default_mode: str = "ask"
     max_image_width: int = 1920
     always_on_top: bool = True
 
     def __post_init__(self) -> None:
+        if isinstance(self.default_mode, str):
+            object.__setattr__(self, 'default_mode', ALIASES.get(self.default_mode, self.default_mode))
         if not isinstance(self.hotkey, str):
             raise ValueError("Hotkey must be text.")
         parse_hotkey(self.hotkey)

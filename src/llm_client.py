@@ -43,14 +43,15 @@ def _request_timeout(base_url: str) -> float:
 
 
 class LLMClient:
-    def analyze_image(self, image_bytes: bytes, mode: str = "general", custom_prompt: str | None = None) -> str:
+    def analyze_image(self, image_bytes: bytes, mode: str = "ask", custom_prompt: str | None = None,
+                      history: list[dict[str, str]] | None = None) -> str:
         prompt = get_prompt(mode)
         key = os.getenv("AI_API_KEY", "").strip()
         if not key:
             raise AnalysisError("AI API key is not configured. Open Settings to add your API key.")
         if not image_bytes:
             raise AnalysisError("The screenshot is empty. Please capture again.")
-        if custom_prompt and custom_prompt.strip():
+        if custom_prompt and custom_prompt.strip() and not history:
             prompt += "\n\nAdditional question about this image:\n" + custom_prompt.strip()
         base_url = os.getenv("AI_BASE_URL") or "https://api.openai.com/v1"
         model = os.getenv("AI_MODEL") or "gpt-4.1-mini"
@@ -66,12 +67,16 @@ class LLMClient:
             {"type": "image_url", "image_url": image_url},
             {"type": "text", "text": prompt},
         ]
+        messages = [{"role": "user", "content": content}]
+        if history and mode == 'ask':
+            messages.extend(dict(message) for message in history[-12:])
+            messages.append({'role': 'user', 'content': (custom_prompt or '').strip() or 'Explain this screenshot.'})
         try:
             with OpenAI(api_key=key, base_url=base_url,
                         timeout=_request_timeout(base_url), max_retries=0) as client:
                 request = {
                     "model": model,
-                    "messages": [{"role": "user", "content": content}],
+                    "messages": messages,
                     "max_tokens": _positive_int("AI_MAX_TOKENS", 1024, 128, 8192),
                 }
                 if is_siliconflow:
@@ -83,6 +88,11 @@ class LLMClient:
                 response = client.chat.completions.create(**request)
             if not response.choices:
                 raise AnalysisError("The AI service returned no answer. Please try again.")
+            if mode in ('extract', 'debug', 'ocr') and getattr(response.choices[0], 'finish_reason', None) == 'length':
+                raise AnalysisError(
+                    'The AI response was cut off by the output token limit. '
+                    'Capture a smaller region or increase AI_MAX_TOKENS in .env (for example, 4096), then restart the app.'
+                )
             message = response.choices[0].message
             text = message.content or getattr(message, "refusal", None)
             if not isinstance(text, str) or not text.strip():

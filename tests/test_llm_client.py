@@ -9,6 +9,27 @@ from src.llm_client import AnalysisError, LLMClient
 
 
 class ClientTests(unittest.TestCase):
+    @patch.dict(os.environ, {"AI_API_KEY": "test-placeholder"})
+    @patch("src.llm_client.OpenAI")
+    def test_truncated_extract_reports_token_limit(self, factory):
+        client = factory.return_value.__enter__.return_value
+        client.chat.completions.create.return_value = SimpleNamespace(choices=[
+            SimpleNamespace(finish_reason='length', message=SimpleNamespace(content='{"content_type":"code",'))])
+        with self.assertRaisesRegex(AnalysisError, 'AI_MAX_TOKENS'):
+            LLMClient().analyze_image(b'png', 'extract')
+
+    @patch.dict(os.environ, {"AI_API_KEY": "test-placeholder"})
+    @patch("src.llm_client.OpenAI")
+    def test_ask_history_precedes_followup(self, factory):
+        client = factory.return_value.__enter__.return_value
+        client.chat.completions.create.return_value = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Follow-up answer"))])
+        history = [{'role': 'user', 'content': 'What is this?'}, {'role': 'assistant', 'content': 'A loop'}]
+        LLMClient().analyze_image(b'png', 'ask', 'Why?', history=history)
+        messages = client.chat.completions.create.call_args.kwargs['messages']
+        self.assertEqual(messages[1:3], history)
+        self.assertEqual(messages[-1], {'role': 'user', 'content': 'Why?'})
+        self.assertEqual(len(history), 2)
+
     def test_missing_key(self):
         with patch.dict(os.environ, {"AI_API_KEY": ""}):
             with self.assertRaisesRegex(AnalysisError, "not configured"):
