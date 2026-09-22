@@ -4,7 +4,7 @@ from src.modes import DEBUG_SCHEMA, EXTRACT_SCHEMAS
 
 MODES = {
     "ask": "Ask", "explain": "Explain", "debug": "Debug",
-    "translate": "Translate", "extract": "Extract",
+    "translate": "Translate", "extract": "Extract", "smart": "Smart",
 }
 ALIASES = {'general': 'ask', 'summarize': 'ask', 'ocr': 'extract'}
 PROMPTS = {

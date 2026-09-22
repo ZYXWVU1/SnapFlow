@@ -26,7 +26,7 @@ class ModeTests(unittest.TestCase):
                 parse_result('extract', json.dumps(data))
 
     def test_phase_one_modes_and_migration(self):
-        self.assertEqual(set(prompts.MODES), {'ask', 'debug', 'extract', 'explain', 'translate'})
+        self.assertEqual(set(prompts.MODES), {'ask', 'debug', 'extract', 'explain', 'translate', 'smart'})
         for old, new in [('general', 'ask'), ('summarize', 'ask'), ('ocr', 'extract')]:
             self.assertEqual(Config(default_mode=old).default_mode, new)
 

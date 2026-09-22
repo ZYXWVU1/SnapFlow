@@ -1,5 +1,6 @@
 """Validated, non-secret settings stored beside the application."""
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from src.prompts import MODES, ALIASES
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.json"
+SMART_CLASSIFICATION_THRESHOLD = 0.75
 
 
 def parse_hotkey(value: str) -> tuple[int, int]:
@@ -28,6 +30,7 @@ class Config:
     default_mode: str = "ask"
     max_image_width: int = 1920
     always_on_top: bool = True
+    smart_classification_threshold: float = SMART_CLASSIFICATION_THRESHOLD
 
     def __post_init__(self) -> None:
         if isinstance(self.default_mode, str):
@@ -41,6 +44,9 @@ class Config:
             raise ValueError("Maximum image width must be between 320 and 8192.")
         if type(self.always_on_top) is not bool:
             raise ValueError("Always on top must be true or false.")
+        threshold = self.smart_classification_threshold
+        if type(threshold) not in (int, float) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise ValueError('Smart classification threshold must be between 0 and 1.')
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:

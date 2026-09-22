@@ -46,6 +46,12 @@ class LLMClient:
     def analyze_image(self, image_bytes: bytes, mode: str = "ask", custom_prompt: str | None = None,
                       history: list[dict[str, str]] | None = None) -> str:
         prompt = get_prompt(mode)
+        return self.request_image(image_bytes, prompt, mode, custom_prompt, history)
+
+    def request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
+                      custom_prompt: str | None = None,
+                      history: list[dict[str, str]] | None = None) -> str:
+        """Shared vision transport for workflow and standalone classification prompts."""
         key = os.getenv("AI_API_KEY", "").strip()
         if not key:
             raise AnalysisError("AI API key is not configured. Open Settings to add your API key.")

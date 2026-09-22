@@ -34,6 +34,11 @@ class ResultWindow(QWidget):
         settings.clicked.connect(self.settings_requested)
         top.addWidget(settings)
         layout.addLayout(top)
+        self.notice = QLabel()
+        self.notice.setTextFormat(Qt.TextFormat.PlainText)
+        self.notice.setWordWrap(True)
+        self.notice.hide()
+        layout.addWidget(self.notice)
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.hide()
@@ -111,7 +116,19 @@ class ResultWindow(QWidget):
         self.action_buttons[label] = button
         self.actions_layout.addWidget(button, index // 3, index % 3)
 
-    def set_busy(self) -> None:
+    def set_notice(self, text: str = '') -> None:
+        self.notice.setText(text)
+        self.notice.setVisible(bool(text))
+
+    def set_placeholder(self, text: str) -> None:
+        self.set_response(text)
+        self.again.setText('Retry')
+        self.copy.hide()
+        ask = QPushButton('Ask AI')
+        ask.clicked.connect(lambda: self.ask_ai.emit(''))
+        self.add_action('Ask AI', ask)
+
+    def set_busy(self, message: str = 'Analyzing screenshot...') -> None:
         self.clear_actions()
         self.structured.hide()
         self.followup_row.hide()
@@ -119,7 +136,7 @@ class ResultWindow(QWidget):
         self.copy.show()
         self.send.setEnabled(False)
         self.preview.hide()
-        self.text.setPlainText("Analyzing screenshot...")
+        self.text.setPlainText(message)
         self.copy.setEnabled(False)
         self.again.setEnabled(False)
         self.mode.setEnabled(False)

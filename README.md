@@ -8,7 +8,7 @@ A small Windows 10/11 utility: press **Ctrl+Shift+S**, select a screen region, a
 - Drag selection on any display, bright selection preview, Esc cancellation.
 - In-memory PNG capture with display scaling correction and optional downscaling.
 - Background vision requests with loading state and readable errors.
-- Ask, Debug, Extract, Explain, and Translate modes.
+- Smart, Ask, Debug, Extract, Explain, and Translate modes.
 - Ask conversation, structured diagnostics, and extracted tables/code/fields with contextual copy buttons.
 - Tray menu, configurable always-on-top behavior, and JSON settings.
 
@@ -21,7 +21,48 @@ A small Windows 10/11 utility: press **Ctrl+Shift+S**, select a screen region, a
 - **Extract:** identifies text, code, table, receipt, contact, event, assignment, JSON, or URL. Tables use a grid with CSV/JSON/Markdown copy actions; code uses a monospace view and Copy Code; other types show extracted fields. Nothing is executed or sent to another app by copy actions.
 - **Explain / Translate:** retain their existing text workflows for later phases.
 
-Malformed structured answers show a retryable error instead of guessed data. Old General and Summarize settings migrate to Ask; Extract Text migrates to Extract. Smart classification and external integrations are deferred.
+Malformed structured answers show a retryable error instead of guessed data. Old General and Summarize settings migrate to Ask; Extract Text migrates to Extract. External integrations remain deferred.
+
+### Phase 2 Smart mode
+
+Choose **Smart** in the tray or result window, then capture normally. Smart shows
+“Understanding screenshot…” and makes one visual classification request before routing:
+
+| Detected content | Workflow |
+| --- | --- |
+| Code Error | Existing structured Debug |
+| Table | Existing structured Extract |
+| Assignment | Placeholder with Ask AI |
+| Event / Meeting | Placeholder with Ask AI |
+| Unknown or uncertain | Automatic Ask fallback |
+
+The same in-memory PNG is used throughout. Classification confidence must be at least
+`smart_classification_threshold` (default `0.75` in `config.json`). Invalid responses and
+classification failures also fall back to Ask. If that request fails, the normal retryable
+API error appears. Closing the window suppresses late results and prevents a completed
+classification from starting another request.
+
+Ask remains the default; select Smart as the default in Settings if desired. Confidence
+is shown for development and is the model's estimate, not a calibrated probability.
+Smart may use two AI requests: classification plus the selected workflow. Assignment
+and Event make only the classification request until you choose Ask AI. Classification
+does not create tasks, calendar events or external actions.
+
+Local development evaluation (all sample text is fictional):
+
+```powershell
+python -m scripts.generate_smart_samples
+python -m scripts.evaluate_classifier
+python -m scripts.evaluate_classifier --live --limit-per-category 1
+```
+
+The second command only inventories samples. `--live` sends sample PNGs to the configured
+provider. Omit the limit to evaluate all 25. No analytics or screenshot content is logged.
+Smart's named Python loggers emit type/confidence/route at INFO and safe failure messages
+at WARNING; enable INFO through standard Python logging during development.
+
+Run `python -m unittest discover -s tests -v` for offline coverage and
+`python -m tests.render_phase2` for synthetic UI inspection.
 
 `Ctrl+Shift+S → drag over a paragraph/code/error → release → answer → Copy`
 

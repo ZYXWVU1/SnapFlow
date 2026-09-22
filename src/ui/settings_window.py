@@ -12,6 +12,7 @@ class SettingsWindow(QDialog):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        self.config = config
         self.setWindowTitle("AI Screenshot Helper - Settings")
         self.setMinimumWidth(440)
         form = QFormLayout(self)
@@ -43,7 +44,8 @@ class SettingsWindow(QDialog):
 
     def submit(self) -> None:
         try:
-            config = Config(self.hotkey.text().strip().lower(), self.mode.currentData(), self.width.value(), self.on_top.isChecked())
+            config = Config(self.hotkey.text().strip().lower(), self.mode.currentData(), self.width.value(),
+                            self.on_top.isChecked(), self.config.smart_classification_threshold)
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid settings", str(exc))
             return

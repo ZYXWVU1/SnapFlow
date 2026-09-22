@@ -1,5 +1,6 @@
 ﻿"""Coordinate capture, background requests, and the tray lifecycle."""
 import os
+import logging
 from dotenv import load_dotenv
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QActionGroup, QCursor, QIcon, QImage
@@ -13,6 +14,10 @@ from src.screenshot import capture_screen, image_to_png_bytes, resize_if_needed
 from src.ui.result_window import ResultWindow
 from src.ui.selection_overlay import SelectionOverlay
 from src.ui.settings_window import SettingsWindow
+from src.smart.models import ClassificationResult, unknown
+from src.smart.router import SmartRouter
+from src.smart.worker import ClassificationWorker
+from src.smart.presentation import detection_notice, loading_message, placeholder_message
 
 
 class WorkerSignals(QObject):
@@ -59,7 +64,7 @@ class ApplicationController(QObject):
         self.client = LLMClient()
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self.workers: dict[int, AnalysisWorker] = {}
+        self.workers: dict[int, AnalysisWorker | ClassificationWorker] = {}
         self.request_id = 0
         self.image_bytes = b""
         self.ask_history: list[dict[str, str]] = []
@@ -161,6 +166,7 @@ class ApplicationController(QObject):
 
     def selected(self, image: QImage) -> None:
         self.clear_overlays()
+        self.result.set_notice()
         self.ask_history.clear()
         self.last_result = None
         self.failed_question = None
@@ -184,24 +190,69 @@ class ApplicationController(QObject):
         if not question and self.failed_question is not None:
             question = self.failed_question
         self.failed_question = None
+        if self.mode == 'smart' and not question.strip():
+            self.run_smart_pipeline()
+            return
+        mode = 'ask' if self.mode == 'smart' else self.mode
+        self.start_analysis(mode, question)
+
+    def start_analysis(self, mode: str, question: str = '') -> None:
         self.request_id += 1
-        worker = AnalysisWorker(self.request_id, self.client, self.image_bytes, self.mode, question,
-                                self.ask_history if self.mode == 'ask' and question.strip() else None)
+        worker = AnalysisWorker(self.request_id, self.client, self.image_bytes, mode, question,
+                                self.ask_history if mode == 'ask' and question.strip() else None)
         worker.signals.finished.connect(self.analysis_finished)
         self.workers[self.request_id] = worker
-        self.result.set_busy()
+        self.result.set_busy(loading_message(mode) if self.mode == 'smart' else 'Analyzing screenshot...')
         self.capture_action.setEnabled(False)
         self.mode_group.setEnabled(False)
         self.pool.start(worker)
 
+    def run_smart_pipeline(self) -> None:
+        self.request_id += 1
+        self.last_result = None
+        self.ask_history.clear()
+        self.result.set_notice()
+        self.result.set_busy('Understanding screenshot...')
+        worker = ClassificationWorker(self.request_id, self.client, self.image_bytes)
+        worker.signals.finished.connect(self.classification_finished)
+        self.workers[self.request_id] = worker
+        self.capture_action.setEnabled(False)
+        self.mode_group.setEnabled(False)
+        self.pool.start(worker)
+
+    @Slot(int, object)
+    def classification_finished(self, request_id: int, classification: ClassificationResult) -> None:
+        worker = self.workers.pop(request_id, None)
+        if self.quitting:
+            QTimer.singleShot(0, self.finish_quit)
+            return
+        if worker is None or request_id != self.request_id or not self.image_bytes:
+            self.capture_action.setEnabled(not self.workers)
+            self.mode_group.setEnabled(not self.workers)
+            return
+        try:
+            route = SmartRouter(self.config.smart_classification_threshold).route(classification)
+            if not isinstance(classification, ClassificationResult) or not classification.is_valid():
+                classification = unknown('Invalid classification.')
+        except Exception:
+            logging.getLogger(__name__).warning('[SMART] Routing failed; falling back to Ask')
+            classification, route = unknown('Routing unavailable.'), 'ask'
+        self.result.set_notice(detection_notice(classification, route))
+        if route in ('assignment', 'event'):
+            self.result.set_placeholder(placeholder_message(route))
+            self.capture_action.setEnabled(True)
+            self.mode_group.setEnabled(True)
+        else:
+            self.start_analysis(route)
+
     @Slot(int, object, bool)
     def analysis_finished(self, request_id: int, text: ModeResult | str, error: bool) -> None:
         worker = self.workers.pop(request_id, None)
-        self.capture_action.setEnabled(not self.quitting)
-        self.mode_group.setEnabled(True)
+        self.capture_action.setEnabled(not self.quitting and not self.workers)
+        self.mode_group.setEnabled(not self.workers)
         if self.quitting:
             QTimer.singleShot(0, self.finish_quit)
-        elif request_id == self.request_id:
+        elif worker is not None and request_id == self.request_id:
             if error:
                 self.failed_question = worker.question
                 self.last_result = None
@@ -234,6 +285,7 @@ class ApplicationController(QObject):
         self.analyze(question or 'Explain the extracted information in this screenshot.')
 
     def discard_result(self) -> None:
+        self.result.set_notice()
         self.image_bytes = b""
         self.ask_history.clear()
         self.last_result = None
@@ -242,6 +294,9 @@ class ApplicationController(QObject):
         self.request_id += 1
 
     def change_mode(self, mode: str, analyze: bool = True) -> None:
+        if self.workers:
+            return
+        self.result.set_notice()
         self.failed_question = None
         self.mode = mode
         self.mode_actions[mode].setChecked(True)
