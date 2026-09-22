@@ -17,7 +17,10 @@ from src.ui.settings_window import SettingsWindow
 from src.smart.models import ClassificationResult, unknown
 from src.smart.router import SmartRouter
 from src.smart.worker import ClassificationWorker
-from src.smart.presentation import detection_notice, loading_message, placeholder_message
+from src.smart.presentation import detection_notice, loading_message
+from src.skills.base import SkillResult
+from src.skills.registry import SKILLS
+from src.skills.worker import SkillExtractionWorker
 
 
 class WorkerSignals(QObject):
@@ -64,11 +67,11 @@ class ApplicationController(QObject):
         self.client = LLMClient()
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
-        self.workers: dict[int, AnalysisWorker | ClassificationWorker] = {}
+        self.workers: dict[int, AnalysisWorker | ClassificationWorker | SkillExtractionWorker] = {}
         self.request_id = 0
         self.image_bytes = b""
         self.ask_history: list[dict[str, str]] = []
-        self.last_result: ModeResult | None = None
+        self.last_result: ModeResult | SkillResult | None = None
         self.failed_question: str | None = None
         self.overlays: list[SelectionOverlay] = []
         self.capturing = False
@@ -238,10 +241,14 @@ class ApplicationController(QObject):
             logging.getLogger(__name__).warning('[SMART] Routing failed; falling back to Ask')
             classification, route = unknown('Routing unavailable.'), 'ask'
         self.result.set_notice(detection_notice(classification, route))
-        if route in ('assignment', 'event'):
-            self.result.set_placeholder(placeholder_message(route))
-            self.capture_action.setEnabled(True)
-            self.mode_group.setEnabled(True)
+        if route in SKILLS:
+            self.request_id += 1
+            worker = SkillExtractionWorker(self.request_id, self.client, self.image_bytes,
+                                           SKILLS[route], classification.confidence)
+            worker.signals.finished.connect(self.analysis_finished)
+            self.workers[self.request_id] = worker
+            self.result.set_busy(loading_message(route))
+            self.pool.start(worker)
         else:
             self.start_analysis(route)
 
@@ -256,9 +263,15 @@ class ApplicationController(QObject):
             if error:
                 self.failed_question = worker.question
                 self.last_result = None
-                self.result.set_response(text, True)
+                if isinstance(worker, SkillExtractionWorker):
+                    self.result.set_skill_error(text)
+                else:
+                    self.result.set_response(text, True)
             else:
                 self.last_result = text
+                if isinstance(text, SkillResult):
+                    self.result.set_skill_result(text)
+                    return
                 conversation = None
                 if text.mode == 'ask':
                     if not worker.question.strip():
@@ -308,13 +321,17 @@ class ApplicationController(QObject):
 
     def open_settings(self) -> None:
         if self.settings and self.settings.isVisible():
+            self.settings.showNormal()
             self.settings.raise_()
+            self.settings.activateWindow()
             return
         if self.settings:
             self.settings.deleteLater()
-        self.settings = SettingsWindow(self.config)
+        self.settings = SettingsWindow(self.config, self.result)
         self.settings.submitted.connect(self.apply_settings)
         self.settings.show()
+        self.settings.raise_()
+        self.settings.activateWindow()
 
     def apply_settings(self, config: Config, key: str) -> None:
         previous = self.config

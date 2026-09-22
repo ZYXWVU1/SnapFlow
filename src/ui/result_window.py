@@ -6,6 +6,9 @@ from src.prompts import MODES
 from src.actions import copy_formats
 from src.modes import ModeResult
 from src.ui.structured_result import StructuredResult
+from src.skill_actions import ACTIONS
+from src.ui.skill_view import render_skill
+from src.ui.skill_actions import run_action
 
 
 class ResultWindow(QWidget):
@@ -52,6 +55,10 @@ class ResultWindow(QWidget):
         self.actions_layout = QGridLayout()
         self.action_buttons = {}
         layout.addLayout(self.actions_layout)
+        self.action_status = QLabel()
+        self.action_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.action_status.setWordWrap(True)
+        layout.addWidget(self.action_status)
         self.followup_row = QWidget()
         followup_layout = QHBoxLayout(self.followup_row)
         followup_layout.setContentsMargins(0, 0, 0, 0)
@@ -77,11 +84,36 @@ class ResultWindow(QWidget):
         self.mode.currentIndexChanged.connect(lambda: self.mode_changed.emit(self.mode.currentData()))
 
     def clear_actions(self):
+        self.action_status.clear()
         while self.actions_layout.count():
             widget = self.actions_layout.takeAt(0).widget()
             widget.hide()
             widget.deleteLater()
         self.action_buttons.clear()
+
+    def set_skill_result(self, result):
+        self.set_response('')
+        self.again.setText('Retry')
+        self.text.hide()
+        self.copy.hide()
+        render_skill(self.structured, result)
+        self.structured.show()
+        for action_id in result.actions:
+            action = ACTIONS.get(action_id)
+            if action is None:
+                continue
+            button = QPushButton(action.label)
+            button.setEnabled(action.enabled(result))
+            if not button.isEnabled():
+                button.setToolTip('Required information was not visible in the screenshot.')
+            button.clicked.connect(lambda checked=False, key=action_id: run_action(self, key, result))
+            self.add_action(action.label, button)
+
+    def set_skill_error(self, message):
+        self.set_response(message, True)
+        button = QPushButton('Ask AI')
+        button.clicked.connect(lambda: self.ask_ai.emit(''))
+        self.add_action('Ask AI', button)
 
     def send_followup(self):
         question = self.followup.text().strip()
@@ -119,14 +151,6 @@ class ResultWindow(QWidget):
     def set_notice(self, text: str = '') -> None:
         self.notice.setText(text)
         self.notice.setVisible(bool(text))
-
-    def set_placeholder(self, text: str) -> None:
-        self.set_response(text)
-        self.again.setText('Retry')
-        self.copy.hide()
-        ask = QPushButton('Ask AI')
-        ask.clicked.connect(lambda: self.ask_ai.emit(''))
-        self.add_action('Ask AI', ask)
 
     def set_busy(self, message: str = 'Analyzing screenshot...') -> None:
         self.clear_actions()

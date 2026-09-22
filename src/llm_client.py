@@ -94,7 +94,7 @@ class LLMClient:
                 response = client.chat.completions.create(**request)
             if not response.choices:
                 raise AnalysisError("The AI service returned no answer. Please try again.")
-            if mode in ('extract', 'debug', 'ocr') and getattr(response.choices[0], 'finish_reason', None) == 'length':
+            if mode in ('extract', 'debug', 'ocr', 'skill') and getattr(response.choices[0], 'finish_reason', None) == 'length':
                 raise AnalysisError(
                     'The AI response was cut off by the output token limit. '
                     'Capture a smaller region or increase AI_MAX_TOKENS in .env (for example, 4096), then restart the app.'

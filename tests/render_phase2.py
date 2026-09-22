@@ -4,7 +4,8 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication
 from src.modes import parse_result
 from src.smart.models import ClassificationResult
-from src.smart.presentation import detection_notice, placeholder_message
+from src.smart.presentation import detection_notice
+from src.skills.registry import SKILLS
 from src.ui.result_window import ResultWindow
 
 
@@ -17,7 +18,7 @@ def main():
         window = ResultWindow('smart', False)
         window.set_notice(detection_notice(ClassificationResult(kind, .96 if kind != 'unknown' else .4), route))
         if route == 'assignment':
-            window.set_placeholder(placeholder_message(route))
+            window.set_skill_result(SKILLS['assignment'].parse('{"title":"Homework 4","due_date":"2026-09-28"}', .96))
         elif route == 'extract':
             window.set_result(parse_result(route, '{"content_type":"table","headers":["Product","Q1","Q2"],"rows":[["Pencils",120,140],["Notebooks",80,95]]}'))
         else:

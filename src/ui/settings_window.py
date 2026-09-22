@@ -1,6 +1,6 @@
 import os
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QMessageBox, QSpinBox
 
 from src.config import Config
@@ -10,8 +10,9 @@ from src.prompts import MODES
 class SettingsWindow(QDialog):
     submitted = Signal(object, str)
 
-    def __init__(self, config: Config) -> None:
-        super().__init__()
+    def __init__(self, config: Config, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, config.always_on_top)
         self.config = config
         self.setWindowTitle("AI Screenshot Helper - Settings")
         self.setMinimumWidth(440)

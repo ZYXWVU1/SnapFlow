@@ -7,10 +7,15 @@ MODES = {
     "translate": "Translate", "extract": "Extract", "smart": "Smart",
 }
 ALIASES = {'general': 'ask', 'summarize': 'ask', 'ocr': 'extract'}
+DEBUG_GUIDANCE = ('Evidence must come from the screenshot. Distinguish hypotheses from visible facts. '
+                  'If no error can be identified, say so, use low confidence and empty evidence/fixes arrays. '
+                  'Do not invent missing code.')
+TABLE_GUIDANCE = ('Preserve visible table values faithfully. Table rows should match the header count; '
+                  'use null for unreadable cells. Never invent missing values.')
 PROMPTS = {
     "ask": "Analyze the screenshot. Answer the user's question clearly. Use the conversation context for follow-up questions.",
     "explain": "Explain this screenshot clearly and step by step for a university student.",
-    "debug": "Diagnose visible code or errors. Return only a JSON object matching this schema: " + json.dumps(DEBUG_SCHEMA) + ". Evidence must come from the screenshot. Distinguish hypotheses from visible facts. If no error can be identified, say so, use low confidence and empty evidence/fixes arrays. Do not invent missing code.",
+    "debug": "Diagnose visible code or errors. Return only a JSON object matching this schema: " + json.dumps(DEBUG_SCHEMA) + '. ' + DEBUG_GUIDANCE,
     "translate": "Translate the visible text into English, preserving meaning and formatting where practical.",
     "extract": (
         "Classify and extract visible information. Return exactly one JSON object, without commentary or Markdown fences. "
@@ -23,7 +28,7 @@ PROMPTS = {
         + '. Preserve text, indentation and code verbatim. Encode line breaks using JSON newline escapes exactly once. '
         'Table rows must match the header count; use null for unreadable cells. Use null for missing nullable fields. '
         'Never invent dates, values or contact details. For unsupported content use content_type=text and transcribe readable text '
-        '(empty string if none). For visible JSON use content_type=json and put the extracted JSON in value.'
+        '(empty string if none). For visible JSON use content_type=json and put the extracted JSON in value.' + TABLE_GUIDANCE
     ),
 }
 

@@ -6,7 +6,7 @@ from src.smart.router import SmartRouter
 
 class RouterTests(unittest.TestCase):
     def test_all_routes_and_boundary(self):
-        for kind, route in dict(code_error='debug', table='extract', assignment='assignment', event='event', unknown='ask').items():
+        for kind, route in dict(code_error='code_error', table='table', assignment='assignment', event='event', unknown='ask').items():
             with self.subTest(kind=kind):
                 self.assertEqual(SmartRouter().route(ClassificationResult(kind, .75)), route)
                 self.assertEqual(SmartRouter().route(ClassificationResult(kind, .749)), 'ask')

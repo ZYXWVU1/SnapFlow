@@ -23,46 +23,53 @@ A small Windows 10/11 utility: press **Ctrl+Shift+S**, select a screen region, a
 
 Malformed structured answers show a retryable error instead of guessed data. Old General and Summarize settings migrate to Ask; Extract Text migrates to Extract. External integrations remain deferred.
 
-### Phase 2 Smart mode
+### Smart mode - Phase 3
 
-Choose **Smart** in the tray or result window, then capture normally. Smart shows
-“Understanding screenshot…” and makes one visual classification request before routing:
+AI Screenshot Helper automatically detects supported screenshot types and turns them into structured actions.
+Choose **Smart**, capture a region, review the extracted details, then choose an action.
 
-| Detected content | Workflow |
-| --- | --- |
-| Code Error | Existing structured Debug |
-| Table | Existing structured Extract |
-| Assignment | Placeholder with Ask AI |
-| Event / Meeting | Placeholder with Ask AI |
-| Unknown or uncertain | Automatic Ask fallback |
+| Smart Skill | Structured information | Local actions |
+| --- | --- | --- |
+| Assignment | Course, title, deadline, points, instructions, submission | Calendar file, details, Markdown, Ask AI |
+| Event | Date/time, location, meeting link, organizer | Calendar file, meeting link, details, Ask AI |
+| Code Error | Problem, evidence, likely cause, suggested fixes | Copy error/fix/diagnosis, Explain, Ask AI |
+| Table | Headers, rows, notes | CSV, JSON, Markdown, tab-separated text, Ask AI |
+| Unknown or uncertain | Ask response | Existing conversation workflow |
 
-The same in-memory PNG is used throughout. Classification confidence must be at least
-`smart_classification_threshold` (default `0.75` in `config.json`). Invalid responses and
-classification failures also fall back to Ask. If that request fails, the normal retryable
-API error appears. Closing the window suppresses late results and prevents a completed
-classification from starting another request.
+```text
+Screenshot -> Classifier -> Smart Router -> Skill Registry -> Skill
+    -> Parse -> Validate -> Normalize -> SkillResult -> Dynamic UI -> Action Registry
+```
 
-Ask remains the default; select Smart as the default in Settings if desired. Confidence
-is shown for development and is the model's estimate, not a calibrated probability.
-Smart may use two AI requests: classification plus the selected workflow. Assignment
-and Event make only the classification request until you choose Ask AI. Classification
-does not create tasks, calendar events or external actions.
+Smart uses two background AI requests: classification and skill extraction (or Ask fallback).
+Classification confidence must meet `smart_classification_threshold` (default `0.75`).
+Confidence is a model estimate. Missing fields are hidden; malformed JSON offers Retry and Ask AI.
+Closing a result invalidates late replies. Ask AI retains the original screenshot and validated structured data.
+Manual Ask, Debug, Extract, Explain and Translate remain available.
 
-Local development evaluation (all sample text is fictional):
+Copy actions use the system clipboard. Calendar export opens a save dialog and writes a local `.ics` file;
+it never opens URLs or connects to calendar accounts. Missing dates disable calendar export; missing times
+produce all-day events. Dates without a clear year remain empty. Missing timezones use floating local time
+with an on-screen note. UTC, explicit offsets and IANA zones are supported; ambiguous abbreviations and
+DST transition times require clearer source data. End times at/before start are omitted with a warning.
+Table previews show at most 10 rows, while exports include all rows.
+
+Settings is owned by the result window and brought to the foreground on every open, including when results
+are set to always stay on top.
+
+Offline and optional live evaluation:
 
 ```powershell
 python -m scripts.generate_smart_samples
-python -m scripts.evaluate_classifier
-python -m scripts.evaluate_classifier --live --limit-per-category 1
+python -m scripts.evaluate_skills
+python -m scripts.evaluate_skills --live --limit-per-category 1
+python -m tests.render_phase3
 ```
 
-The second command only inventories samples. `--live` sends sample PNGs to the configured
-provider. Omit the limit to evaluate all 25. No analytics or screenshot content is logged.
-Smart's named Python loggers emit type/confidence/route at INFO and safe failure messages
-at WARNING; enable INFO through standard Python logging during development.
-
-Run `python -m unittest discover -s tests -v` for offline coverage and
-`python -m tests.render_phase2` for synthetic UI inspection.
+The default evaluation only inventories local samples. `--live` sends images to your provider and may incur
+charges. Add `01.expected.json` beside `01.png` with expected normalized fields (including missing-field nulls)
+to score factual extraction, not just JSON validity. Logs/metrics exclude extracted content and passcodes.
+Review real screenshots for correctness, completeness and invented fields before relying on the results.
 
 `Ctrl+Shift+S → drag over a paragraph/code/error → release → answer → Copy`
 
@@ -85,7 +92,7 @@ python -m pip install -r requirements.txt
 ```
 
 If activation is unavailable, use `.\.venv\Scripts\python.exe` in place of `python`.
-The project depends only on PySide6, python-dotenv, and the official OpenAI SDK.
+The project uses PySide6, python-dotenv, the official OpenAI SDK, and tzdata for Windows calendar timezone support.
 
 When started with `python main.py`, the app checks for these packages first. If one
 is missing, it automatically runs pip with the same Python interpreter and installs
@@ -144,7 +151,12 @@ Settings supports combinations of Ctrl, Alt, Shift, Win and a letter or number. 
 | `src/llm_client.py` | Provider-specific requests, credentials, error mapping |
 | `src/prompts.py` | Central mode labels and prompts |
 | `src/modes.py` | Debug/Extract contracts, result model, and JSON validation |
-| `src/actions.py` | Local clipboard representations (CSV, JSON, Markdown, code, fixes) |
+| `src/actions.py` | Shared CSV/Markdown and manual mode serializers |
+| `src/skills/` | Skill contracts, registry, four schemas/prompts, normalization and extraction worker |
+| `src/skill_actions.py` | Action definitions, availability and payload generation |
+| `src/calendar_export.py` | Local iCalendar serialization, escaping, folding and timezone conversion |
+| `src/ui/skill_view.py` | Skill-driven fields, diagnostics and bounded table previews |
+| `src/ui/skill_actions.py` | User-triggered clipboard, save dialog and follow-up adapter |
 | `src/ui/structured_result.py` | Diagnostic sections and extracted tables/code/fields |
 | `src/ui/` | Selection, results, settings widgets |
 | `tests/` | Offline unit and Qt integration tests |
@@ -181,4 +193,6 @@ Manual acceptance checklist:
 
 ## Roadmap
 
-Next validate these three workflows with representative screenshots on the configured vision model. Then add Phase 2's independent Smart classifier/router for assignment, event, code_error, table, and unknown, with a confidence threshold and Ask fallback. Spatial explanations and translation overlays come later.
+Validate the four Smart skills against representative screenshots with expected-field fixtures. A possible
+Phase 4 is a user-reviewed destination integration, with explicit permissions and confirmation before sending
+data. No accounts, cloud sync, custom skills or autonomous actions are included in Phase 3.

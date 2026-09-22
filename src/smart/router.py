@@ -2,13 +2,12 @@
 import logging
 from src.config import SMART_CLASSIFICATION_THRESHOLD
 from .models import ClassificationResult, valid_confidence
+from src.skills.registry import SKILLS
 
 logger = logging.getLogger(__name__)
 
 
 class SmartRouter:
-    _routes = {'code_error': 'debug', 'table': 'extract', 'assignment': 'assignment',
-               'event': 'event', 'unknown': 'ask'}
 
     def __init__(self, threshold: float = SMART_CLASSIFICATION_THRESHOLD):
         if not valid_confidence(threshold):
@@ -18,6 +17,6 @@ class SmartRouter:
     def route(self, result: ClassificationResult) -> str:
         route = 'ask'
         if isinstance(result, ClassificationResult) and result.is_valid() and result.confidence >= self.threshold:
-            route = self._routes.get(result.content_type, 'ask')
+            route = result.content_type if result.content_type in SKILLS else 'ask'
         logger.info('[SMART] Route: %s', route)
         return route

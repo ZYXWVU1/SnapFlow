@@ -14,6 +14,7 @@ REQUIRED_MODULES = {
     "PySide6": "PySide6",
     "dotenv": "python-dotenv",
     "openai": "openai",
+    "tzdata": "tzdata",
 }
 
 

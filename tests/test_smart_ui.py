@@ -3,7 +3,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QThread, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from src.app import ApplicationController
@@ -24,7 +24,15 @@ class FakeClient:
         self.release = threading.Event()
         self.release.set()
 
-    def request_image(self, image, prompt):
+    def request_image(self, image, prompt, mode=''):
+        if mode == 'skill':
+            self.calls.append((self.kind, image, QThread.currentThread() == APP.thread()))
+            return json.dumps({
+                'assignment': dict(course='CS 220', title='Homework', due_date='2026-09-28'),
+                'event': dict(title='Club', date='2026-09-24', meeting_url='https://zoom.us/j/123'),
+                'code_error': dict(error_type='IndexError', likely_cause='Bad index', evidence=['a[9]']),
+                'table': dict(headers=['A'], rows=[['42']]),
+            }[self.kind])
         self.calls.append(('classify', image, QThread.currentThread() == APP.thread()))
         self.started.set()
         self.release.wait(5)
@@ -68,7 +76,7 @@ class SmartUITests(unittest.TestCase):
         self.fail('Worker did not complete')
 
     def test_routes_reuse_workflows_and_screenshot_off_main_thread(self):
-        for kind, mode in [('code_error', 'debug'), ('table', 'extract'), ('unknown', 'ask')]:
+        for kind, mode in [('code_error', 'code_error'), ('table', 'table'), ('unknown', 'ask')]:
             with self.subTest(kind=kind):
                 client = self.controller.client = FakeClient(kind)
                 self.controller.analyze()
@@ -76,18 +84,19 @@ class SmartUITests(unittest.TestCase):
                 self.wait_for()
                 self.assertEqual([c[0] for c in client.calls], ['classify', mode])
                 self.assertTrue(all(c[1] == b'original png bytes' and not c[2] for c in client.calls))
-                self.assertEqual(self.controller.last_result.mode, mode)
+                self.assertEqual(getattr(self.controller.last_result, 'skill_id', getattr(self.controller.last_result, 'mode', None)), mode)
                 self.assertEqual(self.controller.mode, 'smart')
                 self.assertIn('Confidence: 95%', self.controller.result.notice.text())
 
-    def test_placeholders_and_ask_ai(self):
+    def test_skill_results_and_ask_ai(self):
         for kind in ('assignment', 'event'):
             self.controller.change_mode('smart', analyze=False)
             client = self.controller.client = FakeClient(kind)
             self.controller.analyze()
             self.wait_for()
-            self.assertEqual(len(client.calls), 1)
-            self.assertIn('next phase', self.controller.result.text.toPlainText())
+            self.assertEqual(len(client.calls), 2)
+            self.assertEqual(self.controller.last_result.skill_id, kind)
+            self.assertTrue(self.controller.result.structured.isVisible())
             self.controller.result.action_buttons['Ask AI'].click()
             self.wait_for()
             self.assertEqual(client.calls[-1][0], 'ask')
@@ -164,13 +173,14 @@ class SmartUITests(unittest.TestCase):
     def test_close_during_execution_ignores_late_result(self):
         client = self.controller.client = FakeClient('table')
         started, release = threading.Event(), threading.Event()
-        original = client.analyze_image
+        original = client.request_image
         def delayed(*args, **kwargs):
-            started.set()
-            release.wait(5)
+            if kwargs.get('mode') == 'skill':
+                started.set()
+                release.wait(5)
             return original(*args, **kwargs)
         try:
-            with patch.object(client, 'analyze_image', side_effect=delayed):
+            with patch.object(client, 'request_image', side_effect=delayed):
                 self.controller.analyze()
                 for _ in range(100):
                     if started.is_set():
@@ -198,3 +208,40 @@ class SmartUITests(unittest.TestCase):
             APP.processEvents()
             self.assertEqual(len(client.calls), 1)
             finish.assert_called_once()
+
+    def test_settings_owned_topmost_and_reactivated(self):
+        self.controller.open_settings()
+        window = self.controller.settings
+        self.assertIs(window.parentWidget(), self.controller.result)
+        self.assertTrue(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        with patch.object(window, 'raise_') as raised, patch.object(window, 'activateWindow') as activated:
+            self.controller.open_settings()
+            raised.assert_called_once()
+            activated.assert_called_once()
+        window.close()
+
+    def test_skill_failure_has_ask_and_retry(self):
+        client = self.controller.client = FakeClient('assignment')
+        original = client.request_image
+        def malformed(*args, **kwargs):
+            return 'not json' if kwargs.get('mode') == 'skill' else original(*args, **kwargs)
+        with patch.object(client, 'request_image', side_effect=malformed):
+            self.controller.analyze()
+            self.wait_for()
+        self.assertIsNone(self.controller.last_result)
+        self.assertIn('Ask AI', self.controller.result.action_buttons)
+        self.assertTrue(self.controller.result.again.isEnabled())
+        self.assertIn('could not reliably extract', self.controller.result.text.toPlainText())
+
+    def test_skill_copy_and_contextual_followup(self):
+        client = self.controller.client = FakeClient('assignment')
+        self.controller.analyze()
+        self.wait_for()
+        self.controller.result.action_buttons['Copy Details'].click()
+        self.assertIn('Homework', APP.clipboard().text())
+        with patch.object(client, 'analyze_image', wraps=client.analyze_image) as analyze:
+            self.controller.result.action_buttons['Ask AI'].click()
+            self.wait_for()
+        history = analyze.call_args.kwargs['history']
+        self.assertIn('2026-09-28', history[-1]['content'])
+        self.assertEqual(analyze.call_args.args[0], b'original png bytes')

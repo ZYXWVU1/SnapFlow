@@ -15,4 +15,5 @@ python-runtime.zip
 # Generated local UI verification image.
 result-ui-check.png
 smart-ui-check.png
+phase3-ui-check.png
 tests/manual_samples/*/*.png

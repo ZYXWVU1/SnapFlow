@@ -1,4 +1,4 @@
-"""Small display strings for Smart pipeline progress and placeholders."""
+"""Small display strings for Smart pipeline progress."""
 LABELS = {'code_error': 'Code Error', 'table': 'Table', 'assignment': 'Assignment',
           'event': 'Event / Meeting', 'unknown': 'Unknown'}
 
@@ -12,8 +12,6 @@ def detection_notice(result, route):
 
 def loading_message(route):
     return {'debug': 'Analyzing error...', 'extract': 'Extracting data...',
+            'code_error': 'Diagnosing error...', 'table': 'Extracting data...',
+            'assignment': 'Extracting assignment details...', 'event': 'Extracting event details...',
             'ask': 'Answering in Ask mode...'}.get(route, 'Preparing result...')
-
-
-def placeholder_message(route):
-    return f'{LABELS[route]} extraction will be available in the next phase.\n\nYou can ask AI about this screenshot now.'
