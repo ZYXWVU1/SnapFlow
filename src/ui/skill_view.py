@@ -33,9 +33,13 @@ def render_skill(view, result):
         layout.addWidget(heading)
         layout.addWidget(label)
 
-    skill = SKILLS[result.skill_id]
+    skill = SKILLS.get(result.skill_id)
     section('Smart Result', result.title)
-    for key, label in skill.presentation:
+    if result.presentation:
+        for key, label, required in result.presentation:
+            value = result.data.get(key)
+            section(label, 'Not detected' if required and (value is None or value == []) else value)
+    for key, label in (() if result.presentation or skill is None else skill.presentation):
         value = result.data.get(key)
         if key == 'suggested_fixes':
             for i, fix in enumerate(value or [], 1):
@@ -46,7 +50,7 @@ def render_skill(view, result):
                     section('Why', fix.get('explanation'))
         else:
             section(label, value, key in ('error_message', 'evidence'))
-    if skill.view == 'table':
+    if skill and skill.view == 'table':
         headers, rows = result.data['headers'], result.data['rows']
         section('Table preview', f'{len(rows)} rows × {len(headers)} columns\nShowing {min(10, len(rows))} of {len(rows)} rows')
         table = QTableWidget(min(10, len(rows)), len(headers))

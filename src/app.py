@@ -19,8 +19,10 @@ from src.smart.router import SmartRouter
 from src.smart.worker import ClassificationWorker
 from src.smart.presentation import detection_notice, loading_message
 from src.skills.base import SkillResult
-from src.skills.registry import SKILLS
+from src.skills.registry import SKILLS, SkillRegistry
 from src.skills.worker import SkillExtractionWorker
+from src.skills.custom.storage import CustomSkillStorage
+from src.skills.custom.worker import CustomMatchWorker
 
 
 class WorkerSignals(QObject):
@@ -65,6 +67,10 @@ class ApplicationController(QObject):
             self.config, warning = Config(), str(exc)
         self.mode = self.config.default_mode
         self.client = LLMClient()
+        self.custom_storage = CustomSkillStorage()
+        self.skill_registry = SkillRegistry(self.custom_storage)
+        self.skill_manager = None
+        self.retry_skill = None
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.workers: dict[int, AnalysisWorker | ClassificationWorker | SkillExtractionWorker] = {}
@@ -103,6 +109,7 @@ class ApplicationController(QObject):
             self.mode_group.addAction(action)
             self.mode_actions[value] = action
         self.menu.addAction("Settings", self.open_settings)
+        self.menu.addAction("Visual Skills", self.open_skills)
         self.menu.addSeparator()
         self.menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(self.menu)
@@ -174,6 +181,7 @@ class ApplicationController(QObject):
         self.last_result = None
         self.failed_question = None
         self.result.followup.clear()
+        self.retry_skill = None
         try:
             image = resize_if_needed(image, self.config.max_image_width)
             self.image_bytes = image_to_png_bytes(image)
@@ -194,6 +202,9 @@ class ApplicationController(QObject):
             question = self.failed_question
         self.failed_question = None
         if self.mode == 'smart' and not question.strip():
+            if self.retry_skill:
+                self.start_skill(*self.retry_skill)
+                return
             self.run_smart_pipeline()
             return
         mode = 'ask' if self.mode == 'smart' else self.mode
@@ -242,15 +253,45 @@ class ApplicationController(QObject):
             classification, route = unknown('Routing unavailable.'), 'ask'
         self.result.set_notice(detection_notice(classification, route))
         if route in SKILLS:
+            self.start_skill(SKILLS[route], classification.confidence)
+        elif self.skill_registry.enabled_definitions():
             self.request_id += 1
-            worker = SkillExtractionWorker(self.request_id, self.client, self.image_bytes,
-                                           SKILLS[route], classification.confidence)
-            worker.signals.finished.connect(self.analysis_finished)
+            worker = CustomMatchWorker(self.request_id, self.client, self.image_bytes, self.skill_registry.enabled_definitions())
+            worker.signals.finished.connect(self.custom_match_finished)
             self.workers[self.request_id] = worker
-            self.result.set_busy(loading_message(route))
+            self.result.set_busy('Checking custom Skills...')
             self.pool.start(worker)
         else:
             self.start_analysis(route)
+
+    def start_skill(self, skill, confidence):
+        self.request_id += 1
+        self.retry_skill = (skill, confidence)
+        worker = SkillExtractionWorker(self.request_id, self.client, self.image_bytes, skill, confidence)
+        worker.signals.finished.connect(self.analysis_finished)
+        self.workers[self.request_id] = worker
+        self.result.set_busy(loading_message(skill.id) if skill.id in SKILLS else f'Matched: {skill.title}\nExtracting fields...')
+        self.capture_action.setEnabled(False)
+        self.mode_group.setEnabled(False)
+        self.pool.start(worker)
+
+    @Slot(int, object)
+    def custom_match_finished(self, request_id, match):
+        worker = self.workers.pop(request_id, None)
+        if self.quitting:
+            QTimer.singleShot(0, self.finish_quit)
+            return
+        if worker is None or request_id != self.request_id or not self.image_bytes:
+            self.capture_action.setEnabled(not self.workers)
+            self.mode_group.setEnabled(not self.workers)
+            return
+        skill = self.skill_registry.get(match.skill_id) if match.skill_id else None
+        if skill:
+            self.result.set_notice(f'Matched: {skill.title} · Confidence: {match.confidence:.0%}')
+            self.start_skill(skill, match.confidence)
+        else:
+            self.result.set_notice('No confident custom match. Opening Ask.')
+            self.start_analysis('ask')
 
     @Slot(int, object, bool)
     def analysis_finished(self, request_id: int, text: ModeResult | str, error: bool) -> None:
@@ -268,6 +309,7 @@ class ApplicationController(QObject):
                 else:
                     self.result.set_response(text, True)
             else:
+                self.retry_skill = None
                 self.last_result = text
                 if isinstance(text, SkillResult):
                     self.result.set_skill_result(text)
@@ -298,6 +340,7 @@ class ApplicationController(QObject):
         self.analyze(question or 'Explain the extracted information in this screenshot.')
 
     def discard_result(self) -> None:
+        self.retry_skill = None
         self.result.set_notice()
         self.image_bytes = b""
         self.ask_history.clear()
@@ -310,6 +353,7 @@ class ApplicationController(QObject):
         if self.workers:
             return
         self.result.set_notice()
+        self.retry_skill = None
         self.failed_question = None
         self.mode = mode
         self.mode_actions[mode].setChecked(True)
@@ -318,6 +362,15 @@ class ApplicationController(QObject):
         self.result.mode.blockSignals(False)
         if analyze and self.image_bytes and not self.workers:
             self.analyze()
+
+    def open_skills(self) -> None:
+        from src.ui.skills.skill_manager import SkillManager
+        if self.skill_manager is None:
+            self.skill_manager = SkillManager(self.custom_storage, self.client, self.result)
+        self.skill_manager.refresh()
+        self.skill_manager.show()
+        self.skill_manager.raise_()
+        self.skill_manager.activateWindow()
 
     def open_settings(self) -> None:
         if self.settings and self.settings.isVisible():
@@ -367,6 +420,8 @@ class ApplicationController(QObject):
         self.image_bytes = b""
         if self.settings:
             self.settings.close()
+        if self.skill_manager:
+            self.skill_manager.close()
         if self.workers:
             self.result.set_response("Finishing the current request before quitting...", error=True)
             self.result.show()
@@ -375,6 +430,11 @@ class ApplicationController(QObject):
             self.finish_quit()
 
     def finish_quit(self) -> None:
+        if QThreadPool.globalInstance().activeThreadCount():
+            self.result.set_response('Finishing the current skill request before quitting...', error=True)
+            self.result.show()
+            QTimer.singleShot(50, self.finish_quit)
+            return
         self.pool.waitForDone()
         self.tray.hide()
         self.app.quit()

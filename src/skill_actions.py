@@ -1,6 +1,8 @@
 """Registry of local action payloads. Execution has no implicit external effects."""
 from dataclasses import dataclass
 import json
+import csv
+import io
 from typing import Callable
 
 from src.actions import copy_formats
@@ -19,6 +21,9 @@ def readable(value):
 
 
 def details(result):
+    if result.presentation:
+        return '\n'.join(f'{label}: {readable(result.data.get(key)) if result.data.get(key) is not None else "Not detected"}'
+                         for key, label, required in result.presentation if required or result.data.get(key) is not None)
     return '\n\n'.join(f'{k.replace("_", " ").title()}: {readable(v)}'
                        for k, v in result.data.items() if v is not None and v != [] and v != '')
 
@@ -36,9 +41,25 @@ def markdown(result):
         for char in ('\\', '`', '*', '_', '[', ']', '<', '>', '#'):
             value = value.replace(char, '\\' + char)
         return value.replace('\r\n', '\n').replace('\n', '  \n  ')
-    return f'### {result.title}\n\n' + '\n'.join(
-        f'- **{key.replace("_", " ").title()}:** {safe(value)}'
+    labels = {key: label for key, label, required in result.presentation}
+    return f'### {safe(result.title)}\n\n' + '\n'.join(
+        f'- **{safe(labels.get(key, key.replace("_", " ").title()))}:** {safe(value)}'
         for key, value in result.data.items() if value is not None and value != [] and value != '')
+
+
+def custom_csv(result):
+    def cell(value):
+        text = readable(value)
+        # Screenshot strings and user labels are untrusted spreadsheet cells.
+        # True numeric data retains its numeric CSV representation.
+        if type(value) not in (int, float) and text.lstrip().startswith(('=', '+', '-', '@')):
+            return "'" + text
+        return text
+    stream = io.StringIO(newline='')
+    writer = csv.writer(stream)
+    writer.writerow([cell(label) for key, label, required in result.presentation])
+    writer.writerow([cell(result.data.get(key)) for key, label, required in result.presentation])
+    return stream.getvalue()
 
 
 @dataclass(frozen=True)
@@ -63,6 +84,8 @@ def has_date(result):
 
 
 _definitions = [
+    ActionDefinition('copy_text', 'Copy Plain Text', 'copy', details),
+    ActionDefinition('save_csv', 'Save CSV', 'save_csv', custom_csv, lambda r: bool(r.presentation)),
     ActionDefinition('copy_details', 'Copy Details', 'copy', details),
     ActionDefinition('copy_event_details', 'Copy Details', 'copy', details),
     ActionDefinition('copy_markdown', 'Copy Markdown', 'copy', markdown),

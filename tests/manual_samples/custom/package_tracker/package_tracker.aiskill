@@ -1,0 +1,47 @@
+{
+  "format": "ai-screenshot-helper-skill",
+  "version": 1,
+  "skill": {
+    "id": "package_tracker",
+    "name": "Package Tracker",
+    "description": "Track package delivery.",
+    "detection_prompt": "A shipping or package tracking page.",
+    "fields": [
+      {
+        "id": "carrier",
+        "label": "Carrier",
+        "type": "string",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "tracking_number",
+        "label": "Tracking number",
+        "type": "string",
+        "required": true,
+        "description": null
+      },
+      {
+        "id": "status",
+        "label": "Status",
+        "type": "string",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "estimated_delivery",
+        "label": "Estimated delivery",
+        "type": "date",
+        "required": false,
+        "description": null
+      }
+    ],
+    "actions": [
+      "copy_json",
+      "copy_markdown",
+      "ask_ai"
+    ],
+    "enabled": false,
+    "version": 1
+  }
+}

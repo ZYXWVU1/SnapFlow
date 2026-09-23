@@ -193,6 +193,59 @@ Manual acceptance checklist:
 
 ## Roadmap
 
-Validate the four Smart skills against representative screenshots with expected-field fixtures. A possible
-Phase 4 is a user-reviewed destination integration, with explicit permissions and confirmation before sending
-data. No accounts, cloud sync, custom skills or autonomous actions are included in Phase 3.
+Phase 5 can build explicit, user-reviewed workflows on the shared action registry. Action chains,
+accounts, cloud sync, external integrations and autonomous actions are not implemented.
+
+## Custom Visual Skills (Phase 4)
+
+Users can teach AI Screenshot Helper to recognize new screenshot types, define structured extraction
+fields, and attach reusable actions without writing code.
+
+Open **system tray → Visual Skills**. Choose **Create Skill**, enter a name and detection condition,
+add and reorder fields, select actions, and save. Double-click a custom skill to edit it. The manager
+also supports enable/disable, duplicate, test, export, import, and deletion with confirmation.
+Built-ins are shown separately and keep matching priority.
+
+Supported fields: `string`, `multiline_text`, `number`, `date` (YYYY-MM-DD), `time` (HH:MM), ISO `datetime`,
+`boolean`, HTTP(S) `url`, `email`, and `list_string`. Definitions support 1–20 fields and a detection
+condition up to 1000 characters. Editing labels preserves saved IDs. Missing required values produce
+warnings rather than invented data; missing optional fields are hidden.
+
+**Teach From Screenshot** accepts a local image and a purpose, such as “Track receipts and extract
+merchant, total and date.” Generate sends that image to your configured AI provider and opens a validated
+draft in the editor. Review, test, and enable it when ready. Generated drafts are never saved automatically.
+**Test Skill** works with unsaved or disabled definitions, displays match confidence, and only extracts
+when confidence reaches 75%. Low-confidence results invite editing or another screenshot.
+
+```text
+Screenshot → Built-in classifier → Confident built-in → Existing skill
+                         ↓ otherwise
+                 Enabled custom skills (one matcher request)
+                         ↓ match ≥ 75%              ↓ no match / error
+                 Runtime schema extraction          Ask
+                         ↓
+                 Dynamic fields + configured actions
+```
+
+Actions: **Copy JSON**, **Copy Markdown**, **Copy Plain Text**, **Save CSV**, and **Ask AI**. CSV exports
+one screenshot as one row with field labels as headers; formula-like text is neutralized for spreadsheet
+safety. Ask AI reuses the original screenshot and validated result context. No action runs automatically.
+
+Definitions live in `%APPDATA%\AI Screenshot Helper\custom_skills.json` on Windows. Saves use atomic replacement;
+damaged files are preserved as `.bak` files before recovery. Unsupported storage versions are read-only.
+The fallback location is `~/.local/share/AI Screenshot Helper/`. Changes take effect without restarting.
+Open result cards retain their original labels even if a definition changes or is deleted.
+
+Export uses versioned JSON `.aiskill` files containing definitions only—no images, extracted results, or
+credentials. Imports validate versions/types, remove unsupported actions with a warning, and create a
+unique copy on duplicate IDs. Definitions cannot run scripts or arbitrary commands.
+
+AI matching, extraction, testing and teaching run off the Qt UI thread. Closing a dialog suppresses late
+results but cannot retract a submitted provider request. Quitting waits for pending requests. Custom skills
+cannot override confident built-ins. Model accuracy requires live acceptance testing; large generated
+schemas may require a higher `AI_MAX_TOKENS`.
+
+`src/skills/custom/` owns models, storage, prompts, validation, runtime, matching, generation and interchange;
+`src/ui/skills/` owns editing, testing and teaching. Both built-in and custom skills use `SkillResult` and
+the action registry. Run `python -m unittest discover -s tests -v` for offline coverage. Synthetic examples
+and the provider acceptance checklist are in `tests/manual_samples/custom/README.md`.

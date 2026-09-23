@@ -1,0 +1,69 @@
+{
+  "format": "ai-screenshot-helper-skill",
+  "version": 1,
+  "skill": {
+    "id": "internship_tracker",
+    "name": "Internship Tracker",
+    "description": "Track internship opportunities.",
+    "detection_prompt": "A job or internship posting with a company and role.",
+    "fields": [
+      {
+        "id": "company",
+        "label": "Company",
+        "type": "string",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "position",
+        "label": "Position",
+        "type": "string",
+        "required": true,
+        "description": null
+      },
+      {
+        "id": "location",
+        "label": "Location",
+        "type": "string",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "salary",
+        "label": "Salary",
+        "type": "string",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "requirements",
+        "label": "Requirements",
+        "type": "list_string",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "deadline",
+        "label": "Deadline",
+        "type": "date",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "url",
+        "label": "URL",
+        "type": "url",
+        "required": false,
+        "description": null
+      }
+    ],
+    "actions": [
+      "copy_json",
+      "copy_markdown",
+      "save_csv",
+      "ask_ai"
+    ],
+    "enabled": false,
+    "version": 1
+  }
+}

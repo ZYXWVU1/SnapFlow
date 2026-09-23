@@ -15,11 +15,12 @@ class SkillResult:
     actions: list[str]
     warnings: list[str] = field(default_factory=list)
     raw_response: str | None = field(default=None, repr=False)
+    presentation: tuple[tuple[str, str, bool], ...] = ()
 
     @property
     def text(self):
         # Follow-up context is validated data, never the raw model response.
-        return json.dumps({'skill': self.skill_id, 'data': self.data, 'warnings': self.warnings},
+        return json.dumps({'skill': self.skill_id, 'title': self.title, 'data': self.data, 'warnings': self.warnings},
                           indent=2, ensure_ascii=False, allow_nan=False)
 
 

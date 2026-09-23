@@ -1,0 +1,55 @@
+{
+  "format": "ai-screenshot-helper-skill",
+  "version": 1,
+  "skill": {
+    "id": "receipt_tracker",
+    "name": "Receipt Tracker",
+    "description": "Track purchase receipts.",
+    "detection_prompt": "A store receipt or purchase confirmation.",
+    "fields": [
+      {
+        "id": "merchant",
+        "label": "Merchant",
+        "type": "string",
+        "required": true,
+        "description": null
+      },
+      {
+        "id": "date",
+        "label": "Date",
+        "type": "date",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "total",
+        "label": "Total",
+        "type": "number",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "tax",
+        "label": "Tax",
+        "type": "number",
+        "required": false,
+        "description": null
+      },
+      {
+        "id": "order_id",
+        "label": "Order ID",
+        "type": "string",
+        "required": false,
+        "description": null
+      }
+    ],
+    "actions": [
+      "copy_json",
+      "copy_text",
+      "save_csv",
+      "ask_ai"
+    ],
+    "enabled": false,
+    "version": 1
+  }
+}
