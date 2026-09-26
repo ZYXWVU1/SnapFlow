@@ -9,6 +9,7 @@ from .action_selector import ActionSelector
 
 class SkillEditor(QDialog):
     saved = Signal(object)
+    draft_saved = Signal(object)
 
     def __init__(self, definition=None, parent=None, client=None, existing=()):
         super().__init__(parent)
@@ -40,9 +41,14 @@ class SkillEditor(QDialog):
         self.detection.setPlainText(definition.detection_prompt if definition else '')
         self.detection.setMaximumHeight(85)
         self.detection.setPlaceholderText('For example: a job listing with a company and role. Maximum 1000 characters.')
+        self.extraction_guidance = QTextEdit()
+        self.extraction_guidance.setPlainText(definition.extraction_prompt if definition else '')
+        self.extraction_guidance.setMaximumHeight(85)
+        self.extraction_guidance.setPlaceholderText('Optional guidance for extracting the defined fields.')
         form.addRow('Skill name', self.name)
         form.addRow('Description', self.description)
         form.addRow('Detect screenshots containing', self.detection)
+        form.addRow('Extraction guidance', self.extraction_guidance)
         self.identity_card.content.addLayout(form)
         self.fields_card = Card()
         self.fields_card.content.addWidget(QLabel('Extract these fields · up to 20 · order controls the result'))
@@ -77,9 +83,13 @@ class SkillEditor(QDialog):
         buttons.addStretch()
         save = AppButton('Save Skill', variant='primary')
         save.clicked.connect(self.submit)
+        draft = AppButton('Save Draft')
+        draft.setEnabled(definition is not None)
+        draft.clicked.connect(self.save_draft)
         cancel = AppButton('Cancel', variant='ghost')
         cancel.clicked.connect(self.reject)
         buttons.addWidget(cancel)
+        buttons.addWidget(draft)
         buttons.addWidget(save)
         layout.addLayout(buttons)
         self.fields.changed.connect(self.update_preview)
@@ -97,7 +107,9 @@ class SkillEditor(QDialog):
     def definition(self):
         return CustomSkillDefinition(self.original.id if self.original else unique_id(safe_id(self.name.text()), self.existing),
                                      self.name.text().strip(), self.description.text().strip(), self.detection.toPlainText().strip(),
-                                     self.fields.definitions(), self.actions.selected(), self.enabled.isChecked())
+                                     self.fields.definitions(), self.actions.selected(), self.enabled.isChecked(),
+                                     extraction_prompt=self.extraction_guidance.toPlainText().strip(),
+                                     few_shot_examples=self.original.few_shot_examples if self.original else ())
 
     def submit(self):
         try:
@@ -107,6 +119,17 @@ class SkillEditor(QDialog):
             return
         self.error.clear()
         self.saved.emit(definition)
+
+    def save_draft(self):
+        if self.original is None:
+            return
+        try:
+            definition = self.definition()
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            return
+        self.error.clear()
+        self.draft_saved.emit(definition)
 
     def test_skill(self):
         try:

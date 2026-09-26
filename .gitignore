@@ -1,12 +1,14 @@
 .venv/
 .env
+/tests/
 config.json
 __pycache__/
 *.py[cod]
 .pytest_cache/
 build/
 dist/
-docs/
+docs/*
+!docs/PHASE7_IMPLEMENTATION.md
 
 # Local bundled runtime; distribute this separately if needed.
 .python-runtime/
@@ -16,4 +18,3 @@ python-runtime.zip
 result-ui-check.png
 smart-ui-check.png
 phase3-ui-check.png
-tests/manual_samples/*/*.png

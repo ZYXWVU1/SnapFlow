@@ -289,3 +289,13 @@ The [Visual Skill editor](assets/screenshots/skill-editor-light.png) uses the sa
 The [Skills overview](assets/screenshots/skills-light.png) and [Workflow overview](assets/screenshots/workflows-light.png) show built-in/custom Skills and ordered Actions.
 
 See [Integration architecture and setup](INTEGRATIONS.md) for connection steps, scope choices, testing, and limitations. The included [render script](tests/render_phase6.py) creates synthetic UI screenshots without account access or network requests.
+
+## Adaptive Visual Intelligence (Phase 7)
+
+For a structured Smart Mode result, select **Edit Result**, correct the fields, and choose **Save Corrections**. The result and its available Actions update immediately. Earlier Workflow runs stay in history and are never repeated by a correction. Saving a verified example is a separate choice. If you save one, you can also choose whether to include the screenshot; declining image storage keeps the corrected fields but prevents later image reevaluation for that case.
+
+Open **Visual Skills → Examples** to inspect or delete saved examples and screenshots. The Skill editor offers **Save Draft** for an unpublished revision. **Versions** shows published snapshots and drafts; restoring a prior version creates a new published revision. Edits that would break a dependent Workflow are blocked until its field mappings are repaired.
+
+Open **Evaluation** to create development, validation, and locked test datasets from verified examples. A case can only belong to one dataset type. **Run Evaluation** sends each available saved screenshot to the configured AI provider in the background and stores actual metrics and case details. **Generate Improvement Proposal** reads development feedback and creates an unpublished Skill draft. Evaluate current and candidate versions on the same validation or locked test dataset, review the prompt diff and any regressions, then explicitly **Publish Candidate** or **Discard** it. Paid provider calls happen only when you start an evaluation or generate a proposal.
+
+Learning data lives locally in `learning.sqlite3` beside `custom_skills.json`; consented screenshot files live in `verified_images`. The **Clear Saved Feedback** control in the example library removes all saved examples and their images. See [Phase 7 implementation notes](docs/PHASE7_IMPLEMENTATION.md) for architecture, metric definitions, test results, and limits.

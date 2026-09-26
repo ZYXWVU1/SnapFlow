@@ -75,6 +75,8 @@ class CustomSkillDefinition:
     actions: tuple[str, ...]
     enabled: bool = True
     version: int = 1
+    extraction_prompt: str = ''
+    few_shot_examples: tuple[dict, ...] = ()
 
     def __post_init__(self):
         check_id(self.id)
@@ -95,12 +97,18 @@ class CustomSkillDefinition:
             raise ValueError('Actions must be unique.')
         if type(self.enabled) is not bool or type(self.version) is not int or self.version != 1:
             raise ValueError('Unsupported skill version or invalid enabled flag.')
+        check_text(self.extraction_prompt, 'Extraction guidance', 4000, False)
+        if (not isinstance(self.few_shot_examples, (list, tuple)) or len(self.few_shot_examples) > 5
+                or any(not isinstance(example, dict) for example in self.few_shot_examples)):
+            raise ValueError('Use at most five example objects.')
         object.__setattr__(self, 'fields', tuple(self.fields))
         object.__setattr__(self, 'actions', tuple(self.actions))
+        object.__setattr__(self, 'few_shot_examples', tuple(self.few_shot_examples))
 
     def to_dict(self):
         return dict(id=self.id, name=self.name, description=self.description, detection_prompt=self.detection_prompt,
-                    fields=[f.to_dict() for f in self.fields], actions=list(self.actions), enabled=self.enabled, version=self.version)
+                    fields=[f.to_dict() for f in self.fields], actions=list(self.actions), enabled=self.enabled, version=self.version,
+                    extraction_prompt=self.extraction_prompt, few_shot_examples=list(self.few_shot_examples))
 
     @classmethod
     def from_dict(cls, raw):
@@ -109,6 +117,7 @@ class CustomSkillDefinition:
         try:
             return cls(raw['id'], raw['name'], raw.get('description', ''), raw['detection_prompt'],
                        [CustomFieldDefinition.from_dict(f) for f in raw['fields']], raw.get('actions', []),
-                       raw.get('enabled', True), raw.get('version', 1))
+                       raw.get('enabled', True), raw.get('version', 1), raw.get('extraction_prompt', ''),
+                       raw.get('few_shot_examples', ()))
         except (KeyError, TypeError) as exc:
             raise ValueError('Invalid skill definition.') from exc

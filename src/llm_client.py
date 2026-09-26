@@ -43,6 +43,25 @@ def _request_timeout(base_url: str) -> float:
 
 
 class LLMClient:
+    def request_text(self, prompt: str, mode: str = 'optimizer') -> str:
+        """Use the configured provider for an explicit text-only Skill proposal."""
+        key = os.getenv('AI_API_KEY', '').strip()
+        if not key:
+            raise AnalysisError('AI API key is not configured. Open Settings to add your API key.')
+        base_url = os.getenv('AI_BASE_URL') or 'https://api.openai.com/v1'
+        model = os.getenv('AI_MODEL') or 'gpt-4.1-mini'
+        try:
+            with OpenAI(api_key=key, base_url=base_url,
+                        timeout=_request_timeout(base_url), max_retries=0) as client:
+                response = client.chat.completions.create(model=model,
+                    messages=[{'role': 'user', 'content': prompt}],
+                    max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192))
+            if not response.choices or not response.choices[0].message.content:
+                raise AnalysisError('The AI service returned an empty proposal.')
+            return response.choices[0].message.content.strip()
+        except (APITimeoutError, APIConnectionError, APIStatusError) as exc:
+            raise AnalysisError('Unable to generate a Skill proposal with the configured AI service.') from None
+
     def analyze_image(self, image_bytes: bytes, mode: str = "ask", custom_prompt: str | None = None,
                       history: list[dict[str, str]] | None = None) -> str:
         prompt = get_prompt(mode)

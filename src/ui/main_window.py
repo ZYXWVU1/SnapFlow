@@ -11,13 +11,15 @@ from src.ui.pages.workflows import WorkflowsPage
 from src.ui.pages.history import HistoryPage
 from src.ui.pages.settings import SettingsPage
 from src.ui.integrations.integration_page import IntegrationPage
+from src.ui.evaluation.page import EvaluationPage
 
 
-PAGES = ('home', 'skills', 'workflows', 'integrations', 'history', 'settings')
+PAGES = ('home', 'skills', 'workflows', 'integrations', 'evaluation', 'history', 'settings')
 _PAGE_COPY = {
     'skills': ('Visual Skills', 'Teach AI to recognize the screenshots that matter to you.', 'Open Visual Skills'),
     'workflows': ('Workflows', 'Choose what happens after a Visual Skill matches.', 'Open Visual Workflows'),
     'integrations': ('Integrations', 'Connect your tools and send structured data where it belongs.', None),
+    'evaluation': ('Evaluation', 'Measure Visual Skills using verified examples.', None),
     'history': ('History', 'Review recent workflow outcomes.', 'Open Workflow History'),
     'settings': ('Settings', 'Control capture, AI, and appearance preferences.', 'Open Settings'),
 }
@@ -101,6 +103,9 @@ class MainWindow(QMainWindow):
                 self.launch_buttons[page] = widget.manage_button
             elif page == 'history':
                 widget = HistoryPage(history)
+            elif page == 'evaluation':
+                widget = EvaluationPage(skills_storage, workflows_storage)
+                widget.open_skills_requested.connect(lambda: self.feature_requested.emit('skills'))
             elif page == 'integrations' and integration_registry is not None:
                 widget = IntegrationPage(integration_registry, connection_storage)
                 widget.connection_requested.connect(self.integration_connect_requested)
@@ -208,7 +213,7 @@ class MainWindow(QMainWindow):
             self._refresh_home()
         elif page == 'settings':
             widget.refresh(self.config)
-        elif page in ('skills', 'workflows', 'history', 'integrations') and hasattr(widget, 'refresh'):
+        elif page in ('skills', 'workflows', 'evaluation', 'history', 'integrations') and hasattr(widget, 'refresh'):
             widget.refresh()
         self.stack.setCurrentWidget(self.pages[page])
         for key, button in self.nav_buttons.items():

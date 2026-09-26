@@ -1,6 +1,8 @@
 ﻿"""Coordinate capture, background requests, and the tray lifecycle."""
 import os
 import logging
+import sqlite3
+from dataclasses import replace
 from dotenv import load_dotenv
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QActionGroup, QCursor, QIcon, QImage
@@ -24,6 +26,10 @@ from src.skills.base import SkillResult
 from src.skills.registry import SKILLS, SkillRegistry
 from src.skills.worker import SkillExtractionWorker
 from src.skills.custom.storage import CustomSkillStorage
+from src.feedback.models import EditableExtraction
+from src.feedback.schema import editable_schema
+from src.feedback.storage import FeedbackStorage
+from src.skill_versions.manager import SkillVersionManager
 from src.skills.custom.worker import CustomMatchWorker
 from src.workflows.storage import WorkflowStorage
 from src.workflows.registry import WorkflowRegistry
@@ -83,6 +89,8 @@ class ApplicationController(QObject):
         self.theme_manager = ThemeManager(app, self.config.theme)
         self.client = LLMClient()
         self.custom_storage = CustomSkillStorage()
+        self.feedback_storage = None
+        self.saved_example_id = None
         self.skill_registry = SkillRegistry(self.custom_storage)
         self.skill_manager = None
         self.workflow_storage = WorkflowStorage()
@@ -111,6 +119,7 @@ class ApplicationController(QObject):
         self.image_bytes = b""
         self.ask_history: list[dict[str, str]] = []
         self.last_result: ModeResult | SkillResult | None = None
+        self.editable_extraction: EditableExtraction | None = None
         self.failed_question: str | None = None
         self.overlays: list[SelectionOverlay] = []
         self.capturing = False
@@ -119,6 +128,7 @@ class ApplicationController(QObject):
         self.main_window = MainWindow(self.config.hotkey, skills_storage=self.custom_storage,
             workflows_storage=self.workflow_storage, history=self.workflow_history, config=self.config,
             integration_registry=self.integration_registry, connection_storage=self.connection_storage)
+        self.main_window.pages['evaluation'].client = self.client
         self.main_window.capture_requested.connect(self.capture)
         self.main_window.feature_requested.connect(self.open_feature)
         self.main_window.integration_connect_requested.connect(self.connect_integration)
@@ -134,6 +144,8 @@ class ApplicationController(QObject):
         self.result.workflow_requested.connect(self.run_workflow)
         self.result.workflow_cancel_requested.connect(self.cancel_workflow)
         self.result.integration_requested.connect(self.open_integrations)
+        self.result.edit_requested.connect(self.edit_result)
+        self.result.save_example_requested.connect(self.save_verified_example)
         self.result.ask.connect(self.analyze)
         self.result.ask_ai.connect(self.ask_about_result)
         self.result.mode_changed.connect(self.change_mode)
@@ -313,6 +325,8 @@ class ApplicationController(QObject):
         self.result.set_notice()
         self.ask_history.clear()
         self.last_result = None
+        self.editable_extraction = None
+        self.saved_example_id = None
         self.failed_question = None
         self.result.followup.clear()
         self.retry_skill = None
@@ -358,6 +372,8 @@ class ApplicationController(QObject):
     def run_smart_pipeline(self) -> None:
         self.request_id += 1
         self.last_result = None
+        self.editable_extraction = None
+        self.saved_example_id = None
         self.ask_history.clear()
         self.result.set_notice()
         self.result.set_busy('Understanding screenshot...')
@@ -438,6 +454,8 @@ class ApplicationController(QObject):
             if error:
                 self.failed_question = worker.question
                 self.last_result = None
+                self.editable_extraction = None
+                self.saved_example_id = None
                 if isinstance(worker, SkillExtractionWorker):
                     self.result.set_skill_error(text)
                 else:
@@ -446,7 +464,9 @@ class ApplicationController(QObject):
                 self.retry_skill = None
                 self.last_result = text
                 if isinstance(text, SkillResult):
-                    self.result.set_skill_result(text)
+                    self.prepare_editable_result(text)
+                    self.saved_example_id = None
+                    self.result.set_skill_result(text, editable=self.editable_extraction is not None)
                     self._auto_seen.clear()
                     self._workflow_results.clear()
                     self.dispatch_auto_workflows(text)
@@ -464,6 +484,73 @@ class ApplicationController(QObject):
                         ('You: ' if message['role'] == 'user' else 'AI: ') + message['content']
                         for message in self.ask_history)
                 self.result.set_result(text, conversation)
+
+    def prepare_editable_result(self, result: SkillResult) -> None:
+        schema = editable_schema(result.skill_id, self.custom_storage)
+        if schema is None:
+            self.editable_extraction = None
+            return
+        version_id = None
+        if self.custom_storage.get_skill(result.skill_id) is not None:
+            try:
+                versions = SkillVersionManager(self.custom_storage, self.workflow_storage)
+                active = next((item for item in reversed(versions.list_versions(result.skill_id))
+                               if item.status == 'published'), None)
+                version_id = active.version_id if active else None
+            except (OSError, sqlite3.Error):
+                pass
+        self.editable_extraction = EditableExtraction.create(result.skill_id, result.data, version_id)
+
+    def edit_result(self) -> None:
+        if not isinstance(self.last_result, SkillResult) or self.editable_extraction is None:
+            return
+        from src.ui.feedback.result_editor import ResultEditor
+        schema = editable_schema(self.last_result.skill_id, self.custom_storage)
+        if schema is None:
+            return
+        editor = ResultEditor(self.editable_extraction, schema, self.result)
+        if editor.exec() != editor.DialogCode.Accepted:
+            return
+        if self.last_result.data != self.editable_extraction.edited_data:
+            self.saved_example_id = None
+        skill = self.skill_registry.get(self.last_result.skill_id)
+        corrected = self.editable_extraction.edited_data.copy()
+        self.last_result = replace(self.last_result, data=corrected,
+                                   actions=skill.actions(corrected) if skill else self.last_result.actions)
+        prior_status = self.result.workflow_status.text()
+        self.result.set_skill_result(self.last_result, editable=True,
+            can_verify=bool(self.editable_extraction.changed_fields) and self.saved_example_id is None)
+        if prior_status:
+            self.result.set_workflow_status(prior_status, running=bool(self.workflow_jobs))
+        if self.editable_extraction.changed_fields and self.saved_example_id is None:
+            answer = QMessageBox.question(self.result, 'Save as Verified Example?',
+                'Save these corrections as a verified example for future Skill evaluation and improvement?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                self.save_verified_example()
+
+    def save_verified_example(self) -> None:
+        if self.editable_extraction is None or not self.editable_extraction.changed_fields or self.saved_example_id:
+            return
+        screenshot = None
+        if self.image_bytes:
+            answer = QMessageBox.question(self.result, 'Save screenshot?',
+                'Include this screenshot in the verified example? It will be stored locally for image evaluation.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                screenshot = self.image_bytes
+        try:
+            if self.feedback_storage is None:
+                self.feedback_storage = FeedbackStorage()
+            record = self.feedback_storage.save_verified(self.editable_extraction, screenshot=screenshot)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self.result, 'Unable to save example', str(exc))
+            return
+        self.saved_example_id = record.id
+        self.result.set_skill_result(self.last_result, editable=True)
+        self.result.set_notice('Verified example saved locally.')
 
     def run_workflow(self, workflow_id: str, *, automatic=False, preview=False) -> None:
         if not isinstance(self.last_result, SkillResult) or self.quitting:
@@ -554,6 +641,8 @@ class ApplicationController(QObject):
         self.image_bytes = b""
         self.ask_history.clear()
         self.last_result = None
+        self.editable_extraction = None
+        self.saved_example_id = None
         self.failed_question = None
         self.result.followup.clear()
         self.request_id += 1
@@ -582,7 +671,8 @@ class ApplicationController(QObject):
     def _ensure_skill_manager(self):
         from src.ui.skills.skill_manager import SkillManager
         if self.skill_manager is None:
-            self.skill_manager = SkillManager(self.custom_storage, self.client, self.result, workflows=self.workflow_storage)
+            self.skill_manager = SkillManager(self.custom_storage, self.client, self.result,
+                workflows=self.workflow_storage, feedback_storage=self.feedback_storage)
             self.skill_manager.finished.connect(lambda _: self.main_window.pages['skills'].refresh())
         return self.skill_manager
 

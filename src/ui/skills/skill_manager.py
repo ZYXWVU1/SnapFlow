@@ -1,6 +1,7 @@
 """Definition management. Only explicit Save publishes editor drafts."""
 from dataclasses import replace
 from pathlib import Path
+import sqlite3
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, QLabel, QPushButton, QMessageBox, QFileDialog
 from src.skills.registry import SKILLS
@@ -10,10 +11,12 @@ from .skill_editor import SkillEditor
 
 
 class SkillManager(QDialog):
-    def __init__(self, storage, client, parent=None, workflows=None):
+    def __init__(self, storage, client, parent=None, workflows=None, feedback_storage=None):
         super().__init__(parent)
         self.storage, self.client = storage, client
         self.workflows = workflows
+        self.feedback_storage = feedback_storage
+        self.version_manager = None
         self.dialogs = []
         self.setWindowTitle('Visual Skills')
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -32,7 +35,7 @@ class SkillManager(QDialog):
         layout.addWidget(self.custom, 1)
         self.selected_buttons = []
         row = QHBoxLayout()
-        for title, callback in [('Edit', self.edit_selected), ('Enable / Disable', self.toggle_selected),
+        for title, callback in [('Edit', self.edit_selected), ('Examples', self.show_examples), ('Versions', self.show_versions), ('Enable / Disable', self.toggle_selected),
                                 ('Test', self.test_selected), ('Export', self.export_selected), ('Duplicate', self.duplicate_selected), ('Delete', self.delete_selected)]:
             button = QPushButton(title)
             button.clicked.connect(callback)
@@ -82,16 +85,29 @@ class SkillManager(QDialog):
             try:
                 if definition is None or creating:
                     self.storage.create_skill(skill)
+                    self.versions().record_current(skill)
                 else:
                     if self.storage.get_skill(definition.id) != definition:
                         raise ValueError('This skill was changed or deleted while editing. Close this editor and reopen the current skill.')
-                    self.storage.save_skill(skill)
-            except (OSError, ValueError) as exc:
+                    draft = self.versions().create_draft(skill, 'Edited by user')
+                    self.versions().publish(draft.version_id)
+            except (OSError, ValueError, sqlite3.Error) as exc:
                 editor.error.setText(str(exc))
                 return
             editor.accept()
             self.refresh()
         editor.saved.connect(save)
+        def save_draft(skill):
+            try:
+                if definition is None or self.storage.get_skill(definition.id) != definition:
+                    raise ValueError('This Skill changed while editing. Reopen the current version.')
+                self.versions().create_draft(skill, 'Manual draft')
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                editor.error.setText(str(exc))
+                return
+            editor.accept()
+            self.refresh()
+        editor.draft_saved.connect(save_draft)
         self.dialogs.append(editor)
         editor.show()
         return editor
@@ -143,6 +159,42 @@ class SkillManager(QDialog):
             self.dialogs.append(dialog)
             dialog.show()
 
+    def show_examples(self):
+        skill = self.selected()
+        if skill is None:
+            return
+        from src.feedback.storage import FeedbackStorage
+        from src.ui.feedback.example_library import ExampleLibrary
+        try:
+            if self.feedback_storage is None:
+                self.feedback_storage = FeedbackStorage()
+            dialog = ExampleLibrary(self.feedback_storage, skill.id, self)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            self.status.setText('Unable to open verified examples: ' + str(exc))
+            return
+        self.dialogs.append(dialog)
+        dialog.show()
+
+    def versions(self):
+        if self.version_manager is None:
+            from src.skill_versions.manager import SkillVersionManager
+            self.version_manager = SkillVersionManager(self.storage, self.workflows)
+        return self.version_manager
+
+    def show_versions(self):
+        skill = self.selected()
+        if skill is None:
+            return
+        from .version_history import VersionHistory
+        try:
+            dialog = VersionHistory(self.versions(), skill.id, self)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            self.status.setText('Unable to open version history: ' + str(exc))
+            return
+        dialog.finished.connect(lambda _: self.refresh())
+        self.dialogs.append(dialog)
+        dialog.show()
+
     def teach(self):
         if self.client:
             from .teach_by_example import TeachByExample
@@ -176,6 +228,7 @@ class SkillManager(QDialog):
                     raise ValueError('Skill file must be under 1 MB.')
                 skill, warnings = import_skill(Path(path).read_text(encoding='utf-8'), {s.id for s in self.storage.list_skills()})
                 self.storage.create_skill(skill)
+                self.versions().record_current(skill)
                 self.refresh()
                 self.status.setText('Skill imported. ' + ' '.join(warnings))
             except (OSError, ValueError) as exc:

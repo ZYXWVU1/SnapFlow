@@ -22,6 +22,8 @@ class ResultWindow(QWidget):
     workflow_requested = Signal(str)
     workflow_cancel_requested = Signal()
     integration_requested = Signal()
+    edit_requested = Signal()
+    save_example_requested = Signal()
 
     def __init__(self, mode: str, always_on_top: bool) -> None:
         super().__init__()
@@ -158,13 +160,21 @@ class ResultWindow(QWidget):
             'reauthorization' in text.casefold() or 'reconnect' in text.casefold())
         self.workflow_cancel.setVisible(running)
 
-    def set_skill_result(self, result):
+    def set_skill_result(self, result, *, editable=False, can_verify=False):
         self.set_response('')
         self.again.setText('Retry')
         self.text.hide()
         self.copy.hide()
         render_skill(self.structured, result)
         self.structured.show()
+        if editable:
+            edit = AppButton('Edit Result', variant='secondary')
+            edit.clicked.connect(self.edit_requested)
+            self.add_action('Edit Result', edit)
+        if can_verify:
+            save_example = AppButton('Save Verified Example', variant='secondary')
+            save_example.clicked.connect(self.save_example_requested)
+            self.add_action('Save Verified Example', save_example)
         for action_id in result.actions:
             action = ACTIONS.get(action_id)
             if action is None:

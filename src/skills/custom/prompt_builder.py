@@ -14,7 +14,9 @@ def extraction_prompt(definition):
     fields = [f.to_dict() | {'value_rule': TYPE_RULES[f.field_type]} for f in definition.fields]
     return (SAFETY + 'Extract only visible or strongly supported information. Use null for unavailable fields, '
             'including required fields. Return an object keyed by the field IDs, without extra keys. Configuration:\n'
-            + json.dumps({'name': definition.name, 'fields': fields}, ensure_ascii=False))
+            + json.dumps({'name': definition.name, 'fields': fields,
+                          'extraction_guidance': definition.extraction_prompt,
+                          'examples': definition.few_shot_examples}, ensure_ascii=False))
 
 
 def matcher_prompt(definitions):
