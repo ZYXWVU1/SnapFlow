@@ -28,3 +28,13 @@ class ConfigTests(unittest.TestCase):
         for value in ("s", "ctrl+ctrl+s", "ctrl+é", "ctrl+space", "meta+s"):
             with self.assertRaises(ValueError):
                 parse_hotkey(value)
+
+    def test_theme_round_trip_and_validation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.json"
+            config = Config(theme='dark')
+            save_config(config, path)
+            self.assertEqual(load_config(path).theme, 'dark')
+            self.assertEqual(Config().theme, 'system')
+            with self.assertRaises(ValueError):
+                Config(theme='sepia')

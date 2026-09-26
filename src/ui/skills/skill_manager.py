@@ -10,9 +10,10 @@ from .skill_editor import SkillEditor
 
 
 class SkillManager(QDialog):
-    def __init__(self, storage, client, parent=None):
+    def __init__(self, storage, client, parent=None, workflows=None):
         super().__init__(parent)
         self.storage, self.client = storage, client
+        self.workflows = workflows
         self.dialogs = []
         self.setWindowTitle('Visual Skills')
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
@@ -113,10 +114,17 @@ class SkillManager(QDialog):
 
     def delete_selected(self):
         skill = self.selected()
-        if skill and QMessageBox.question(self, 'Delete Skill', f'Delete "{skill.name}"?\nThis removes the skill definition.',
+        dependents = ([w for w in self.workflows.list_workflows() if w.trigger.skill_id == skill.id]
+                      if skill and self.workflows else [])
+        message = f'Delete "{skill.name}"?\nThis removes the skill definition.' if skill else ''
+        if dependents:
+            message += f'\n{len(dependents)} Workflow(s) use this Skill. They will be disabled.'
+        if skill and QMessageBox.question(self, 'Delete Skill', message,
                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                           QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             try:
+                for workflow in dependents:
+                    self.workflows.set_enabled(workflow.id, False)
                 self.storage.delete_skill(skill.id)
                 self.refresh()
             except (OSError, ValueError) as exc:

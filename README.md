@@ -1,6 +1,16 @@
-# AI Screenshot Helper
+# Visual Workflow AI
 
-A small Windows 10/11 utility: press **Ctrl+Shift+S**, select a screen region, and get an AI answer in a floating window. Python 3.11+ required.
+Visual Workflow AI turns screen content into structured information and user-configurable actions. Press **Ctrl+Shift+S**, select a screen region, review the result, and run a local or connected Workflow. Windows 10/11 and Python 3.11+ are required.
+
+```text
+Screen → Understand → Visual Skill → Structured Data → Workflow → Local / Cloud Actions
+```
+
+The app opens from the system tray into a Home dashboard with Skills, Workflows, Integrations, History, and Settings. Appearance follows the system theme by default; Light and Dark are available in Settings.
+
+![Visual Workflow AI Home](assets/screenshots/home-light.png)
+
+Dark appearance and the floating result use the same design system: [dark Home](assets/screenshots/home-dark.png) · [Smart result](assets/screenshots/result-dark.png).
 
 ## Features
 
@@ -21,7 +31,7 @@ A small Windows 10/11 utility: press **Ctrl+Shift+S**, select a screen region, a
 - **Extract:** identifies text, code, table, receipt, contact, event, assignment, JSON, or URL. Tables use a grid with CSV/JSON/Markdown copy actions; code uses a monospace view and Copy Code; other types show extracted fields. Nothing is executed or sent to another app by copy actions.
 - **Explain / Translate:** retain their existing text workflows for later phases.
 
-Malformed structured answers show a retryable error instead of guessed data. Old General and Summarize settings migrate to Ask; Extract Text migrates to Extract. External integrations remain deferred.
+Malformed structured answers show a retryable error instead of guessed data. Old General and Summarize settings migrate to Ask; Extract Text migrates to Extract.
 
 ### Smart mode - Phase 3
 
@@ -193,8 +203,7 @@ Manual acceptance checklist:
 
 ## Roadmap
 
-Phase 5 can build explicit, user-reviewed workflows on the shared action registry. Action chains,
-accounts, cloud sync, external integrations and autonomous actions are not implemented.
+Phase 6 adds bounded Google Calendar, Google Sheets, and Todoist Actions to the existing Workflow engine. Gmail, arbitrary HTTP Actions, scripts, browser automation, and cloud synchronization remain outside this release.
 
 ## Custom Visual Skills (Phase 4)
 
@@ -249,3 +258,34 @@ schemas may require a higher `AI_MAX_TOKENS`.
 `src/ui/skills/` owns editing, testing and teaching. Both built-in and custom skills use `SkillResult` and
 the action registry. Run `python -m unittest discover -s tests -v` for offline coverage. Synthetic examples
 and the provider acceptance checklist are in `tests/manual_samples/custom/README.md`.
+
+## Visual Workflows
+
+Visual Skills determine what a screenshot means. Visual Workflows determine what happens next.
+
+Open **Visual Workflows** from the tray to create a Workflow. Pick a built-in or custom Visual Skill, add AND conditions and ordered Actions, then choose Suggest or Auto. Suggest shows a Run button with the Skill result; Auto requires confirmation before it can execute after a screenshot match. **Run Test** previews Actions without changing files or the clipboard. History keeps recent statuses without screenshots or extracted data. Workflows can be duplicated, exported and safely imported in disabled Suggest mode.
+
+See [Visual Workflows usage and architecture](WORKFLOWS.md) and the [Phase 5 validation report](PHASE5_REPORT.md).
+
+## Integrations and cloud Workflows (Phase 6)
+
+Open **Home → Integrations** to connect Google or Todoist. Google requires a **Desktop OAuth client ID** from your Google Cloud project. Choose Calendar, Sheets, or both before browser consent. Google desktop OAuth does not support true incremental authorization; adding a capability requires reconnecting with the combined scope set. Todoist uses a personal API token entered in the masked connection dialog. Tokens and Google authorization records are stored in Windows Credential Manager, while `integrations.json` holds only connection status, account label, and granted capability names. Disconnect removes the local credential without deleting any Workflow.
+
+![Integrations](assets/screenshots/integrations-light.png)
+
+The Workflow editor offers three registered external Actions:
+
+| Action | Configuration | Write |
+| --- | --- | --- |
+| Create Google Calendar Event | Calendar ID, title template, date and optional time/description/location/reminder fields | One event |
+| Append Google Sheet Row | Spreadsheet ID or Google Sheets URL, tab, ordered column-to-Skill-field mapping, optional header creation | One row, after header validation |
+| Create Todoist Task | Project ID, title/description templates, optional due date/time fields, priority | One task |
+
+Use a Skill result to **Run Test** before enabling a Workflow. Dry Run prepares the mapped values and shows what would be sent without making an external write. New Workflows use Suggest mode. Switching to Auto asks for explicit confirmation and names the external Actions. Imported Workflows stay disabled in Suggest mode until reviewed. When an integration is disconnected or needs reauthorization, its Action fails with a connection message. A timeout after a write reports an unknown result; review the service account before retrying, since writes are never retried automatically. Workflow History saves execution and step status metadata, without screenshots, extracted field values, or credentials.
+
+![Workflow editor](assets/screenshots/workflow-editor-light.png)
+
+The [Visual Skill editor](assets/screenshots/skill-editor-light.png) uses the same cards and scrollable layout.
+The [Skills overview](assets/screenshots/skills-light.png) and [Workflow overview](assets/screenshots/workflows-light.png) show built-in/custom Skills and ordered Actions.
+
+See [Integration architecture and setup](INTEGRATIONS.md) for connection steps, scope choices, testing, and limitations. The included [render script](tests/render_phase6.py) creates synthetic UI screenshots without account access or network requests.

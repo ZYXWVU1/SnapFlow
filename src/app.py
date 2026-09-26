@@ -14,6 +14,8 @@ from src.screenshot import capture_screen, image_to_png_bytes, resize_if_needed
 from src.ui.result_window import ResultWindow
 from src.ui.selection_overlay import SelectionOverlay
 from src.ui.settings_window import SettingsWindow
+from src.ui.main_window import MainWindow
+from src.ui.design.theme import ThemeManager
 from src.smart.models import ClassificationResult, unknown
 from src.smart.router import SmartRouter
 from src.smart.worker import ClassificationWorker
@@ -23,6 +25,18 @@ from src.skills.registry import SKILLS, SkillRegistry
 from src.skills.worker import SkillExtractionWorker
 from src.skills.custom.storage import CustomSkillStorage
 from src.skills.custom.worker import CustomMatchWorker
+from src.workflows.storage import WorkflowStorage
+from src.workflows.registry import WorkflowRegistry
+from src.workflows.executor import WorkflowExecutor
+from src.workflows.context import WorkflowContext
+from src.workflows.history import WorkflowHistory
+from src.ui.workflows.runner import WorkflowBridge, WorkflowWorker
+from src.integrations.registry import IntegrationRegistry
+from src.integrations.storage import ConnectionStorage
+from src.integrations.credentials import CredentialService
+from src.integrations.service import IntegrationService
+from src.ui.integrations.connection_dialog import GoogleConnectDialog, TodoistConnectDialog
+from src.ui.integrations.worker import ConnectionWorker
 
 
 class WorkerSignals(QObject):
@@ -66,10 +80,29 @@ class ApplicationController(QObject):
         except ValueError as exc:
             self.config, warning = Config(), str(exc)
         self.mode = self.config.default_mode
+        self.theme_manager = ThemeManager(app, self.config.theme)
         self.client = LLMClient()
         self.custom_storage = CustomSkillStorage()
         self.skill_registry = SkillRegistry(self.custom_storage)
         self.skill_manager = None
+        self.workflow_storage = WorkflowStorage()
+        self.workflow_manager = None
+        self.workflow_registry = WorkflowRegistry(self.workflow_storage)
+        self.workflow_history = WorkflowHistory()
+        self.integration_registry = IntegrationRegistry()
+        self.connection_storage = ConnectionStorage()
+        self.credential_service = CredentialService()
+        self.integration_service = IntegrationService(self.integration_registry,
+            self.connection_storage, self.credential_service)
+        self.integration_pool = QThreadPool(self)
+        self.integration_pool.setMaxThreadCount(2)
+        self.integration_jobs = {}
+        self.integration_dialogs = []
+        self.workflow_pool = QThreadPool(self)
+        self.workflow_pool.setMaxThreadCount(1)
+        self.workflow_jobs = {}
+        self._auto_seen = set()
+        self._workflow_results = []
         self.retry_skill = None
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
@@ -83,7 +116,24 @@ class ApplicationController(QObject):
         self.capturing = False
         self.quitting = False
         self.settings: SettingsWindow | None = None
+        self.main_window = MainWindow(self.config.hotkey, skills_storage=self.custom_storage,
+            workflows_storage=self.workflow_storage, history=self.workflow_history, config=self.config,
+            integration_registry=self.integration_registry, connection_storage=self.connection_storage)
+        self.main_window.capture_requested.connect(self.capture)
+        self.main_window.feature_requested.connect(self.open_feature)
+        self.main_window.integration_connect_requested.connect(self.connect_integration)
+        self.main_window.integration_test_requested.connect(self.test_integration)
+        self.main_window.integration_disconnect_requested.connect(self.disconnect_integration)
+        self.main_window.skill_edit_requested.connect(self.edit_skill)
+        self.main_window.skill_test_requested.connect(self.test_skill)
+        self.main_window.workflow_edit_requested.connect(self.edit_workflow)
+        self.main_window.workflow_test_requested.connect(self.test_workflow)
+        self._restore_home_after_capture = False
         self.result = ResultWindow(self.mode, self.config.always_on_top)
+        self.result.set_workflow_registry(self.workflow_registry)
+        self.result.workflow_requested.connect(self.run_workflow)
+        self.result.workflow_cancel_requested.connect(self.cancel_workflow)
+        self.result.integration_requested.connect(self.open_integrations)
         self.result.ask.connect(self.analyze)
         self.result.ask_ai.connect(self.ask_about_result)
         self.result.mode_changed.connect(self.change_mode)
@@ -94,8 +144,10 @@ class ApplicationController(QObject):
             icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         app.setWindowIcon(icon)
         self.tray = QSystemTrayIcon(icon, self)
+        self.workflow_bridge = WorkflowBridge(self.tray, self.ask_about_result, self)
         self.tray.setToolTip("AI Screenshot Helper")
         self.menu = QMenu()
+        self.home_action = self.menu.addAction("Open Home", self.open_home)
         self.capture_action = self.menu.addAction("Capture Screenshot", self.capture)
         self.menu.addSeparator()
         mode_menu = self.menu.addMenu("Mode")
@@ -110,6 +162,7 @@ class ApplicationController(QObject):
             self.mode_actions[value] = action
         self.menu.addAction("Settings", self.open_settings)
         self.menu.addAction("Visual Skills", self.open_skills)
+        self.menu.addAction("Visual Workflows", self.open_workflows)
         self.menu.addSeparator()
         self.menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(self.menu)
@@ -131,10 +184,88 @@ class ApplicationController(QObject):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.capture()
 
+    def open_home(self) -> None:
+        self.main_window.open_page('home')
+        self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+
+    def open_integrations(self, integration_id=None) -> None:
+        self.main_window.open_page('integrations')
+        self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+
+    def open_feature(self, page: str) -> None:
+        if page == 'skills':
+            self.open_skills()
+        elif page == 'workflows':
+            self.open_workflows()
+        elif page == 'history':
+            self.open_workflows()
+            self.workflow_manager.show_history()
+        elif page == 'settings':
+            self.open_settings()
+
+    def connect_integration(self, integration_id: str):
+        if self.quitting or integration_id in self.integration_jobs:
+            return None
+        if integration_id == 'google':
+            connection = self.connection_storage.get('google')
+            dialog = GoogleConnectDialog(self.credential_service.get('google_client_id') or '', self.main_window,
+                capabilities=connection.granted_capabilities if connection else ())
+            dialog.submitted.connect(lambda client_id, capabilities:
+                self._start_integration_worker('google', 'connect_google', client_id, capabilities))
+        elif integration_id == 'todoist':
+            dialog = TodoistConnectDialog(self.main_window)
+            dialog.submitted.connect(lambda token:
+                self._start_integration_worker('todoist', 'connect_todoist', token))
+        else:
+            raise ValueError('Unknown integration.')
+        dialog.finished.connect(lambda: self.integration_dialogs.remove(dialog)
+            if dialog in self.integration_dialogs else None)
+        self.integration_dialogs.append(dialog)
+        dialog.show()
+        return dialog
+
+    def _start_integration_worker(self, integration_id, operation, *args):
+        if self.quitting or integration_id in self.integration_jobs:
+            return
+        worker = ConnectionWorker(self.integration_service, integration_id, operation, *args)
+        worker.signals.finished.connect(self.integration_finished)
+        self.integration_jobs[integration_id] = worker
+        self.main_window.pages['integrations'].set_busy(integration_id, True,
+            'Checking…' if operation == 'test_connection' else 'Disconnecting…'
+            if operation == 'disconnect' else 'Connecting…')
+        self.integration_pool.start(worker)
+
+    def test_integration(self, integration_id):
+        self._start_integration_worker(integration_id, 'test_connection', integration_id)
+
+    def disconnect_integration(self, integration_id):
+        if integration_id in self.integration_jobs:
+            return
+        answer = QMessageBox.question(self.main_window, 'Disconnect integration',
+            'Disconnect this integration? Workflows using it will need a new connection.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer == QMessageBox.StandardButton.Yes:
+            self._start_integration_worker(integration_id, 'disconnect', integration_id)
+
+    @Slot(str, object)
+    def integration_finished(self, integration_id, outcome):
+        self.main_window.pages['integrations'].refresh()
+        self.main_window.pages['integrations'].set_busy(integration_id, False)
+        self.integration_jobs.pop(integration_id, None)
+        if not self.quitting:
+            self.main_window.toast.show_message(outcome.message)
+
     def capture(self) -> None:
         if self.capturing or self.workers or self.quitting:
             return
         self.capturing = True
+        self._restore_home_after_capture = self.main_window.isVisible()
+        self.main_window.hide()
         self.result.hide()
         if self.settings:
             self.settings.hide()
@@ -171,6 +302,9 @@ class ApplicationController(QObject):
 
     def cancel_selection(self) -> None:
         self.clear_overlays()
+        if self._restore_home_after_capture:
+            self.main_window.show()
+            self._restore_home_after_capture = False
         if self.image_bytes:
             self.result.show()
 
@@ -313,6 +447,9 @@ class ApplicationController(QObject):
                 self.last_result = text
                 if isinstance(text, SkillResult):
                     self.result.set_skill_result(text)
+                    self._auto_seen.clear()
+                    self._workflow_results.clear()
+                    self.dispatch_auto_workflows(text)
                     return
                 conversation = None
                 if text.mode == 'ask':
@@ -327,6 +464,78 @@ class ApplicationController(QObject):
                         ('You: ' if message['role'] == 'user' else 'AI: ') + message['content']
                         for message in self.ask_history)
                 self.result.set_result(text, conversation)
+
+    def run_workflow(self, workflow_id: str, *, automatic=False, preview=False) -> None:
+        if not isinstance(self.last_result, SkillResult) or self.quitting:
+            return
+        workflow = next((w for w in self.workflow_registry.matching(self.last_result.skill_id)
+                         if w.id == workflow_id), None)
+        if workflow is None or (automatic and not workflow.auto_run):
+            return
+        request_key = (self.request_id, workflow.id)
+        if request_key in self.workflow_jobs or (automatic and request_key in self._auto_seen):
+            return
+        if automatic:
+            self._auto_seen.add(request_key)
+        context = WorkflowContext.from_result(self.last_result, request_id=str(self.request_id))
+        worker = WorkflowWorker(workflow, context, WorkflowExecutor(self.skill_registry), self.workflow_bridge,
+                                preview=preview, storage=self.workflow_storage,
+                                integration_service=self.integration_service)
+        worker.signals.finished.connect(self.workflow_finished)
+        self.workflow_jobs[request_key] = worker
+        for button in self.result.workflow_buttons:
+            button.setEnabled(False)
+        self.result.set_workflow_status('Running ' + workflow.name + '…', running=True)
+        self.workflow_pool.start(worker)
+
+    def dispatch_auto_workflows(self, result: SkillResult) -> None:
+        if self.quitting or not isinstance(result, SkillResult):
+            return
+        workflows = [w for w in self.workflow_registry.matching(result.skill_id) if w.auto_run]
+        for workflow in workflows:
+            self.run_workflow(workflow.id, automatic=True)
+        if len(workflows) > 1:
+            self.result.set_workflow_status(f'{len(workflows)} Auto Workflows queued in order.', running=True)
+
+    def cancel_workflow(self) -> None:
+        for worker in self.workflow_jobs.values():
+            worker.cancel.set()
+
+    @Slot(object, object)
+    def workflow_finished(self, worker, execution) -> None:
+        self.workflow_jobs.pop((int(worker.context.request_id), worker.definition.id), None)
+        if execution is not None and not worker.preview:
+            try:
+                self.workflow_history.record(worker.definition, execution, worker.context.skill_id)
+            except OSError:
+                logging.getLogger(__name__).warning('Unable to write Workflow history.')
+        if self.quitting:
+            QTimer.singleShot(0, self.finish_quit)
+            return
+        if int(worker.context.request_id) != self.request_id or not isinstance(self.last_result, SkillResult):
+            return
+        running = bool(self.workflow_jobs)
+        for button in self.result.workflow_buttons:
+            button.setEnabled(not running)
+        if execution is None:
+            self._workflow_results.append(worker.definition.name + ': failed unexpectedly')
+            self.result.set_workflow_status('\n'.join(self._workflow_results), running=running)
+            return
+        lines = [f'{worker.definition.name}: {execution.status}']
+        if execution.error:
+            lines.append(execution.error)
+        lines.extend(f'{step.action_id}: {step.status}' +
+                     (f' · {step.error}' if step.error else f' · {step.message}' if step.message else '')
+                     for step in execution.steps)
+        self._workflow_results.append('\n'.join(lines))
+        self.result.set_workflow_status('\n\n'.join(self._workflow_results), running=running)
+        self.main_window.pages['integrations'].refresh()
+        for step in execution.steps:
+            if step.status == 'success' and step.action_id in (
+                'google_calendar_create_event', 'google_sheets_append_row', 'todoist_create_task'):
+                self.main_window.toast.show_message(step.message)
+        if worker.definition.auto_run and execution.status in ('failed', 'partial_success'):
+            self.tray.showMessage('Workflow failed', worker.definition.name + ': ' + execution.status)
 
     def ask_about_result(self, question: str = '') -> None:
         if self.workers or not self.image_bytes:
@@ -364,13 +573,81 @@ class ApplicationController(QObject):
             self.analyze()
 
     def open_skills(self) -> None:
-        from src.ui.skills.skill_manager import SkillManager
-        if self.skill_manager is None:
-            self.skill_manager = SkillManager(self.custom_storage, self.client, self.result)
+        self._ensure_skill_manager()
         self.skill_manager.refresh()
         self.skill_manager.show()
         self.skill_manager.raise_()
         self.skill_manager.activateWindow()
+
+    def _ensure_skill_manager(self):
+        from src.ui.skills.skill_manager import SkillManager
+        if self.skill_manager is None:
+            self.skill_manager = SkillManager(self.custom_storage, self.client, self.result, workflows=self.workflow_storage)
+            self.skill_manager.finished.connect(lambda _: self.main_window.pages['skills'].refresh())
+        return self.skill_manager
+
+    def edit_skill(self, skill_id):
+        skill = self.custom_storage.get_skill(skill_id)
+        if skill is None:
+            self.main_window.pages['skills'].refresh()
+            return None
+        editor = self._ensure_skill_manager().show_editor(skill)
+        editor.saved.connect(lambda _: QTimer.singleShot(0, self.main_window.pages['skills'].refresh))
+        return editor
+
+    def test_skill(self, skill_id):
+        skill = self.custom_storage.get_skill(skill_id)
+        if skill is None:
+            self.main_window.pages['skills'].refresh()
+            return None
+        from src.ui.skills.skill_test_dialog import SkillTestDialog
+        dialog = SkillTestDialog(skill, self.client, self.result)
+        self._ensure_skill_manager().dialogs.append(dialog)
+        dialog.show()
+        return dialog
+
+    def open_workflows(self) -> None:
+        self._ensure_workflow_manager()
+        self.workflow_manager.refresh()
+        self.workflow_manager.show()
+        self.workflow_manager.raise_()
+        self.workflow_manager.activateWindow()
+
+    def _ensure_workflow_manager(self):
+        from src.ui.workflows.workflow_manager import WorkflowManager
+        if self.workflow_manager is None:
+            self.workflow_manager = WorkflowManager(self.workflow_storage, self.skill_registry, self.result,
+                allow_auto=True, result_provider=lambda: self.last_result if isinstance(self.last_result, SkillResult) else None,
+                history=self.workflow_history, connection_storage=self.connection_storage,
+                open_integrations=self.open_integrations, integration_service=self.integration_service)
+            self.workflow_manager.finished.connect(lambda _: self.main_window.pages['workflows'].refresh())
+        return self.workflow_manager
+
+    def edit_workflow(self, workflow_id):
+        definition = self.workflow_storage.get_workflow(workflow_id)
+        if definition is None:
+            self.main_window.pages['workflows'].refresh()
+            return None
+        editor = self._ensure_workflow_manager().show_editor(definition)
+        editor.saved.connect(lambda _: QTimer.singleShot(0, self.main_window.pages['workflows'].refresh))
+        return editor
+
+    def test_workflow(self, workflow_id):
+        definition = self.workflow_storage.get_workflow(workflow_id)
+        if definition is None:
+            self.main_window.pages['workflows'].refresh()
+            return
+        if not isinstance(self.last_result, SkillResult) or self.last_result.skill_id != definition.trigger.skill_id:
+            self.main_window.toast.show_message('Capture a screenshot matching this Visual Skill, then run the test.')
+            return
+        manager = self._ensure_workflow_manager()
+        manager.refresh()
+        for index in range(manager.list.count()):
+            item = manager.list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == workflow_id:
+                manager.list.setCurrentItem(item)
+                manager.test_selected()
+                return
 
     def open_settings(self) -> None:
         if self.settings and self.settings.isVisible():
@@ -399,6 +676,10 @@ class ApplicationController(QObject):
             QMessageBox.warning(self.settings, "Unable to save settings", str(exc))
             return
         self.config = config
+        self.main_window.config = config
+        self.main_window.pages['settings'].refresh(config)
+        self.theme_manager.set_preference(config.theme)
+        self.main_window.hotkey_label.setText(' + '.join(part.capitalize() for part in config.hotkey.split('+')))
         if key:
             os.environ["AI_API_KEY"] = key
         visible = self.result.isVisible()
@@ -417,11 +698,14 @@ class ApplicationController(QObject):
         self.quitting = True
         self.hotkeys.close()
         self.clear_overlays()
+        self.main_window.close()
         self.image_bytes = b""
         if self.settings:
             self.settings.close()
         if self.skill_manager:
             self.skill_manager.close()
+        if self.workflow_manager:
+            self.workflow_manager.close()
         if self.workers:
             self.result.set_response("Finishing the current request before quitting...", error=True)
             self.result.show()
@@ -430,11 +714,13 @@ class ApplicationController(QObject):
             self.finish_quit()
 
     def finish_quit(self) -> None:
-        if QThreadPool.globalInstance().activeThreadCount():
+        if QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or self.integration_jobs:
             self.result.set_response('Finishing the current skill request before quitting...', error=True)
             self.result.show()
             QTimer.singleShot(50, self.finish_quit)
             return
         self.pool.waitForDone()
+        self.workflow_pool.waitForDone()
+        self.integration_pool.waitForDone()
         self.tray.hide()
         self.app.quit()

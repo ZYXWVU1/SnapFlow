@@ -31,6 +31,7 @@ class Config:
     max_image_width: int = 1920
     always_on_top: bool = True
     smart_classification_threshold: float = SMART_CLASSIFICATION_THRESHOLD
+    theme: str = 'system'
 
     def __post_init__(self) -> None:
         if isinstance(self.default_mode, str):
@@ -47,6 +48,8 @@ class Config:
         threshold = self.smart_classification_threshold
         if type(threshold) not in (int, float) or not math.isfinite(threshold) or not 0 <= threshold <= 1:
             raise ValueError('Smart classification threshold must be between 0 and 1.')
+        if self.theme not in ('system', 'light', 'dark'):
+            raise ValueError('Theme must be System, Light, or Dark.')
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:
