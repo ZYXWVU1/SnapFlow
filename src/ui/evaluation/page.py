@@ -1,8 +1,9 @@
 """Learning dashboard backed only by local verified examples and runs."""
 from pathlib import Path
+import os
 import sqlite3
 
-from PySide6.QtCore import QThreadPool, Signal
+from PySide6.QtCore import QThreadPool, Qt, Signal
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QMessageBox, QInputDialog,
                               QScrollArea, QVBoxLayout, QWidget)
 
@@ -10,6 +11,7 @@ from src.evaluation.datasets import DatasetStorage
 from src.evaluation.config import current_model_identifier
 from src.evaluation.runner import EvaluationRunner
 from src.evaluation.storage import EvaluationStorage
+from src.usage import normalize_provider
 from src.feedback.storage import FeedbackStorage, default_path
 from src.skill_versions.manager import SkillVersionManager
 from src.optimizer.service import SkillOptimizer
@@ -29,6 +31,8 @@ class EvaluationPage(QScrollArea):
         self.learning_path = (Path(learning_path) if learning_path is not None else
             skills_storage.path.with_name('learning.sqlite3') if hasattr(skills_storage, 'path') else default_path())
         self.feedback = self.datasets = self.versions = self.reports = self.optimizer = None
+        self.usage_storage = None
+        self.max_evaluation_cases = 100
         self.worker = None
         self.dialogs = []
         self.setWidgetResizable(True)
@@ -188,13 +192,15 @@ class EvaluationPage(QScrollArea):
             self._services()
             if self.client is None:
                 raise ValueError('AI client is unavailable.')
-            dialog = RunDialog(self.datasets, self.versions, self)
+            dialog = RunDialog(self.datasets, self.versions, self, usage_storage=self.usage_storage,
+                               max_cases=self.max_evaluation_cases)
             self.dialogs.append(dialog)
             if not dialog.exec():
                 return
             runner = EvaluationRunner(self.feedback, self.datasets, self.versions, self.reports, self.client)
             self.worker = EvaluationWorker(runner, dialog.version.currentData(),
-                dialog.dataset.currentData(), dialog.model.text().strip())
+                dialog.dataset.currentData(), dialog.model.text().strip(),
+                max_cases=dialog.case_limit.value())
             self.worker.signals.finished.connect(self.evaluation_finished)
             self.run_button.setEnabled(False)
             self.generate_button.setEnabled(False)
@@ -292,9 +298,28 @@ class EvaluationPage(QScrollArea):
                                          text=current_model_identifier())
         if not ok or not model.strip():
             return
+        selected_dataset = datasets[labels.index(label)]
+        available_count = len(self.datasets.available_examples(selected_dataset))
+        case_count = min(available_count, self.max_evaluation_cases)
+        provider = os.getenv('AI_BASE_URL') or 'https://api.openai.com/v1'
+        preview = (self.usage_storage.evaluation_preview(
+            case_count, provider, model.strip(), comparisons=2) if self.usage_storage is not None else None)
+        preview_text = (f"Estimated cost: about ${preview.estimated_cost_usd:.4f}, based on "
+                        f"{preview.sample_count} recent evaluation request(s)."
+                        if preview and preview.estimated_cost_usd is not None
+                        else "Cost estimate unavailable for this provider/model until matching usage is measured.")
+        message = (f"Provider/model: {normalize_provider(provider)} / {model.strip()}. This compares two Skill versions "
+                   f"on {case_count} of {available_count} available case(s), with up to "
+                   f"{case_count * 4} AI requests. {preview_text} Actual charges may differ. Continue?")
+        confirmation = QMessageBox(QMessageBox.Icon.Question, 'Confirm evaluation cost', message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        confirmation.setTextFormat(Qt.TextFormat.PlainText)
+        confirmation.setDefaultButton(QMessageBox.StandardButton.No)
+        if confirmation.exec() != QMessageBox.StandardButton.Yes:
+            return
         runner = EvaluationRunner(self.feedback, self.datasets, self.versions, self.reports, self.client)
         self.worker = CandidateEvaluationWorker(self.optimizer, runner, candidate,
-            datasets[labels.index(label)].id, model.strip())
+            selected_dataset.id, model.strip(), max_cases=case_count)
         self.worker.signals.finished.connect(self.candidate_finished)
         self.run_button.setEnabled(False)
         self.generate_button.setEnabled(False)

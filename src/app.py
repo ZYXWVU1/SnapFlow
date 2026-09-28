@@ -3,11 +3,17 @@ import os
 import logging
 import sqlite3
 from dataclasses import replace
+from datetime import datetime, timezone
 from dotenv import load_dotenv
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QActionGroup, QCursor, QIcon, QImage
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QStyle
-from src.config import Config, ROOT, load_config, save_config
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtGui import QActionGroup, QCursor, QDesktopServices, QIcon, QImage
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon, QStyle
+from src.config import Config, load_config, save_config
+from src.paths import AppPaths
+from src.app_version import APP_NAME, APP_VERSION
+from src.backup import BackupError, BackupService
+from src.diagnostics import DiagnosticsService, configure_logging, classify_error
+from src.usage import UsageStorage
 from src.hotkeys import Hotkeys
 from src.llm_client import AnalysisError, LLMClient
 from src.modes import ModeResult, ResponseFormatError, parse_result
@@ -16,7 +22,12 @@ from src.screenshot import capture_screen, image_to_png_bytes, resize_if_needed
 from src.ui.result_window import ResultWindow
 from src.ui.selection_overlay import SelectionOverlay
 from src.ui.settings_window import SettingsWindow
+from src.ui.onboarding import OnboardingDialog
+from src.ui.onboarding_worker import OnboardingConnectionWorker
+from src.ui.diagnostics_worker import BasicHealthCheckWorker
 from src.ui.main_window import MainWindow
+from src.ui.update_dialog import UpdateDialog, official_release_page
+from src.ui.update_worker import UpdateCheckWorker
 from src.ui.design.theme import ThemeManager
 from src.smart.models import ClassificationResult, unknown
 from src.smart.router import SmartRouter
@@ -39,7 +50,7 @@ from src.workflows.history import WorkflowHistory
 from src.ui.workflows.runner import WorkflowBridge, WorkflowWorker
 from src.integrations.registry import IntegrationRegistry
 from src.integrations.storage import ConnectionStorage
-from src.integrations.credentials import CredentialService
+from src.integrations.credentials import CredentialError, CredentialService
 from src.integrations.service import IntegrationService
 from src.ui.integrations.connection_dialog import GoogleConnectDialog, TodoistConnectDialog
 from src.ui.integrations.worker import ConnectionWorker
@@ -68,38 +79,67 @@ class AnalysisWorker(QRunnable):
             error = False
         except (AnalysisError, ResponseFormatError) as exc:
             text, error = str(exc), True
-        except Exception:
-            text, error = "An unexpected analysis error occurred. Please try again.", True
+        except Exception as exc:
+            report = classify_error(exc)
+            logging.getLogger(__name__).exception(
+                "Unhandled analysis error [%s] category=%s", report.reference_id, report.category)
+            text, error = f"{report.user_message} Reference: {report.reference_id}", True
         finally:
             self.data = b""
         self.signals.finished.emit(self.request_id, text, error)
 
 
 class ApplicationController(QObject):
-    def __init__(self, app: QApplication, preview: bool = False) -> None:
+    api_usage_changed = Signal(object)
+    monthly_cost_warning = Signal(float)
+
+    def __init__(self, app: QApplication, preview: bool = False, paths=None, *, suppress_onboarding=False) -> None:
         super().__init__()
         self.app, self.preview = app, preview
-        load_dotenv(ROOT / ".env")
+        self.paths = paths or AppPaths()
+        configure_logging(self.paths)
+        self.diagnostics_service = DiagnosticsService(self.paths)
+        self.backup_service = BackupService(self.paths)
+        self.usage_storage = UsageStorage(self.paths.learning_database)
+        load_dotenv(self.paths.environment_file)
+        self._environment_api_key = os.getenv("AI_API_KEY", "")
+        self.api_key_source = "environment" if self._environment_api_key else ""
+        self.api_key_stored = False
+        self.credential_service = CredentialService()
+        try:
+            stored_api_key = self.credential_service.get_ai_api_key()
+        except CredentialError as exc:
+            logging.getLogger(__name__).warning(
+                "Unable to read the saved AI key from Windows Credential Manager: %s", exc)
+        else:
+            self.api_key_stored = bool(stored_api_key)
+            if not self._environment_api_key and stored_api_key:
+                os.environ["AI_API_KEY"] = stored_api_key
+                self.api_key_source = "credential"
         warning = ""
         try:
-            self.config = load_config()
+            self.config = load_config(self.paths.config_file)
         except ValueError as exc:
             self.config, warning = Config(), str(exc)
+        if self.config.ai_base_url:
+            os.environ['AI_BASE_URL'] = self.config.ai_base_url
+        if self.config.ai_model:
+            os.environ['AI_MODEL'] = self.config.ai_model
+        self.usage_session_started = datetime.now(timezone.utc).isoformat()
         self.mode = self.config.default_mode
         self.theme_manager = ThemeManager(app, self.config.theme)
-        self.client = LLMClient()
-        self.custom_storage = CustomSkillStorage()
+        self.client = LLMClient(usage_callback=self.record_api_usage)
+        self.custom_storage = CustomSkillStorage(path=self.paths.custom_skills_file)
         self.feedback_storage = None
         self.saved_example_id = None
         self.skill_registry = SkillRegistry(self.custom_storage)
         self.skill_manager = None
-        self.workflow_storage = WorkflowStorage()
+        self.workflow_storage = WorkflowStorage(path=self.paths.workflows_file)
         self.workflow_manager = None
         self.workflow_registry = WorkflowRegistry(self.workflow_storage)
-        self.workflow_history = WorkflowHistory()
+        self.workflow_history = WorkflowHistory(path=self.paths.workflow_history_file)
         self.integration_registry = IntegrationRegistry()
-        self.connection_storage = ConnectionStorage()
-        self.credential_service = CredentialService()
+        self.connection_storage = ConnectionStorage(path=self.paths.integrations_file)
         self.integration_service = IntegrationService(self.integration_registry,
             self.connection_storage, self.credential_service)
         self.integration_pool = QThreadPool(self)
@@ -125,10 +165,18 @@ class ApplicationController(QObject):
         self.capturing = False
         self.quitting = False
         self.settings: SettingsWindow | None = None
+        self.update_worker: UpdateCheckWorker | None = None
+        self.health_check_worker: BasicHealthCheckWorker | None = None
+        self.onboarding_dialog: OnboardingDialog | None = None
+        self.onboarding_connection_worker: OnboardingConnectionWorker | None = None
+        self._onboarding_capture_test = False
         self.main_window = MainWindow(self.config.hotkey, skills_storage=self.custom_storage,
             workflows_storage=self.workflow_storage, history=self.workflow_history, config=self.config,
-            integration_registry=self.integration_registry, connection_storage=self.connection_storage)
+            integration_registry=self.integration_registry, connection_storage=self.connection_storage,
+            paths=self.paths)
         self.main_window.pages['evaluation'].client = self.client
+        self.main_window.pages['evaluation'].usage_storage = self.usage_storage
+        self.main_window.pages['evaluation'].max_evaluation_cases = self.config.max_evaluation_cases
         self.main_window.capture_requested.connect(self.capture)
         self.main_window.feature_requested.connect(self.open_feature)
         self.main_window.integration_connect_requested.connect(self.connect_integration)
@@ -138,6 +186,19 @@ class ApplicationController(QObject):
         self.main_window.skill_test_requested.connect(self.test_skill)
         self.main_window.workflow_edit_requested.connect(self.edit_workflow)
         self.main_window.workflow_test_requested.connect(self.test_workflow)
+        self.main_window.backup_export_requested.connect(self.export_backup)
+        self.main_window.backup_restore_requested.connect(self.restore_backup)
+        self.main_window.open_data_folder_requested.connect(self.open_data_folder)
+        self.main_window.storage_usage_requested.connect(self.refresh_storage_usage)
+        self.main_window.support_bundle_requested.connect(self.export_support_bundle)
+        self.main_window.health_check_requested.connect(self.run_health_check)
+        self.main_window.usage_summary_requested.connect(self.refresh_usage_summary)
+        self.main_window.update_check_requested.connect(self.check_for_updates)
+        self.main_window.onboarding_requested.connect(self.show_onboarding)
+        self.api_usage_changed.connect(self.update_usage_summary)
+        self.monthly_cost_warning.connect(self.show_monthly_cost_warning)
+        self.update_usage_summary(self.usage_storage.monthly_summary(
+            session_start=self.usage_session_started))
         self._restore_home_after_capture = False
         self.result = ResultWindow(self.mode, self.config.always_on_top)
         self.result.set_workflow_registry(self.workflow_registry)
@@ -151,13 +212,13 @@ class ApplicationController(QObject):
         self.result.mode_changed.connect(self.change_mode)
         self.result.closed.connect(self.discard_result)
         self.result.settings_requested.connect(self.open_settings)
-        icon = QIcon(str(ROOT / "assets" / "icon.ico"))
+        icon = QIcon(str(self.paths.resource_path("assets/icon.ico")))
         if icon.isNull():
             icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         app.setWindowIcon(icon)
         self.tray = QSystemTrayIcon(icon, self)
         self.workflow_bridge = WorkflowBridge(self.tray, self.ask_about_result, self)
-        self.tray.setToolTip("AI Screenshot Helper")
+        self.tray.setToolTip(APP_NAME)
         self.menu = QMenu()
         self.home_action = self.menu.addAction("Open Home", self.open_home)
         self.capture_action = self.menu.addAction("Capture Screenshot", self.capture)
@@ -180,17 +241,25 @@ class ApplicationController(QObject):
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.tray_activated)
         self.tray.show()
+        if self.config.automatic_update_checks:
+            QTimer.singleShot(1500, lambda: self.check_for_updates(manual=False))
         self.hotkeys = Hotkeys(app)
         self.hotkeys.triggered.connect(self.capture)
+        self.hotkey_error = ''
         try:
             self.hotkeys.register(self.config.hotkey)
         except ValueError as exc:
-            warning += "\n" + str(exc)
+            self.hotkey_error = str(exc)
+            warning += "\n" + self.hotkey_error
         app.aboutToQuit.connect(self.hotkeys.close)
         if warning:
-            QTimer.singleShot(0, lambda: self.show_error(warning.strip()))
+            error_context = 'hotkey' if self.hotkey_error else 'configuration'
+            QTimer.singleShot(0, lambda: self.report_error(ValueError(warning.strip()), context=error_context))
         elif not os.getenv("AI_API_KEY") and not preview:
-            self.tray.showMessage("AI Screenshot Helper", "Ready. Open Settings to add your API key.")
+            self.tray.showMessage(APP_NAME, "Ready. Open Settings to add your API key.")
+        if (not suppress_onboarding and not preview and not os.getenv("AI_API_KEY")
+                and not self.config.onboarding_complete):
+            QTimer.singleShot(0, self.show_onboarding)
 
     def tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -301,9 +370,14 @@ class ApplicationController(QObject):
                 if screen == active:
                     overlay.activateWindow()
                     overlay.setFocus()
-        except Exception:
+        except Exception as exc:
             self.clear_overlays()
-            self.show_error("Unable to capture the desktop. Try again on an unlocked display.")
+            if self._onboarding_capture_test:
+                logging.getLogger(__name__).warning('Onboarding screen capture test failed.', exc_info=True)
+                self.finish_onboarding_capture_test(
+                    False, 'Unable to capture the desktop. Try again on an unlocked display.')
+            else:
+                self.report_error(exc, context='screenshot_capture')
 
     def clear_overlays(self) -> None:
         for overlay in self.overlays:
@@ -314,6 +388,9 @@ class ApplicationController(QObject):
 
     def cancel_selection(self) -> None:
         self.clear_overlays()
+        if self._onboarding_capture_test:
+            self.finish_onboarding_capture_test(False, 'Capture test cancelled. No image was saved or sent.')
+            return
         if self._restore_home_after_capture:
             self.main_window.show()
             self._restore_home_after_capture = False
@@ -334,7 +411,14 @@ class ApplicationController(QObject):
             image = resize_if_needed(image, self.config.max_image_width)
             self.image_bytes = image_to_png_bytes(image)
         except ValueError as exc:
-            self.show_error(str(exc))
+            if self._onboarding_capture_test:
+                self.finish_onboarding_capture_test(False, str(exc))
+            else:
+                self.report_error(exc, context='screenshot_capture')
+            return
+        if self._onboarding_capture_test:
+            self.finish_onboarding_capture_test(
+                True, 'Capture test succeeded. The selected screenshot was discarded and not sent to an AI service.')
             return
         self.result.show()
         self.result.raise_()
@@ -543,7 +627,7 @@ class ApplicationController(QObject):
                 screenshot = self.image_bytes
         try:
             if self.feedback_storage is None:
-                self.feedback_storage = FeedbackStorage()
+                self.feedback_storage = FeedbackStorage(path=self.paths.learning_database)
             record = self.feedback_storage.save_verified(self.editable_extraction, screenshot=screenshot)
         except (OSError, ValueError, sqlite3.Error) as exc:
             QMessageBox.warning(self.result, 'Unable to save example', str(exc))
@@ -747,38 +831,417 @@ class ApplicationController(QObject):
             return
         if self.settings:
             self.settings.deleteLater()
-        self.settings = SettingsWindow(self.config, self.result)
+        self.settings = SettingsWindow(
+            self.config, self.result,
+            api_key_configured=bool(os.getenv("AI_API_KEY")),
+            api_key_stored=self.api_key_stored)
         self.settings.submitted.connect(self.apply_settings)
+        self.settings.remove_key_requested.connect(self.remove_saved_api_key)
         self.settings.show()
         self.settings.raise_()
         self.settings.activateWindow()
 
+    def show_onboarding(self) -> None:
+        if self.quitting or self.onboarding_dialog is not None:
+            return
+        dialog = OnboardingDialog(self.config, self.main_window, hotkey_error=self.hotkey_error)
+        dialog.setup_requested.connect(self.save_onboarding_setup)
+        dialog.connection_test_requested.connect(self.test_onboarding_connection)
+        dialog.capture_test_requested.connect(self.test_onboarding_capture)
+        dialog.privacy_settings_requested.connect(self.open_settings_from_onboarding)
+        dialog.finished.connect(self.onboarding_finished)
+        self.onboarding_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def test_onboarding_connection(self, key: str, base_url: str, model: str) -> None:
+        dialog = self.onboarding_dialog
+        if dialog is None or self.quitting:
+            return
+        if self.onboarding_connection_worker is not None:
+            dialog.set_connection_test_result(False, 'A connection test is already running.')
+            return
+        key = key or os.getenv('AI_API_KEY', '')
+        if not key:
+            dialog.set_connection_test_result(False, 'Enter an API key before testing the connection.')
+            return
+        try:
+            Config(ai_base_url=base_url, ai_model=model)
+        except ValueError as exc:
+            dialog.set_connection_test_result(False, str(exc))
+            return
+        worker = OnboardingConnectionWorker(self.client, key, base_url, model)
+        self.onboarding_connection_worker = worker
+        worker.signals.finished.connect(self.onboarding_connection_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(bool, str)
+    def onboarding_connection_finished(self, succeeded: bool, message: str) -> None:
+        self.onboarding_connection_worker = None
+        if self.onboarding_dialog is not None:
+            self.onboarding_dialog.set_connection_test_result(succeeded, message)
+
+    def save_onboarding_setup(self, key: str, base_url: str, model: str) -> None:
+        try:
+            candidate = replace(self.config, ai_base_url=base_url, ai_model=model,
+                                onboarding_complete=True)
+        except ValueError as exc:
+            QMessageBox.warning(self.onboarding_dialog, 'Invalid AI setup', str(exc))
+            return
+        previous_saved_key = None
+        credential_updated = False
+        try:
+            if key:
+                previous_saved_key = self.credential_service.get_ai_api_key()
+                self.credential_service.set_ai_api_key(key)
+                credential_updated = True
+            save_config(candidate, self.paths.config_file)
+        except (CredentialError, OSError, ValueError) as exc:
+            if credential_updated:
+                try:
+                    if previous_saved_key:
+                        self.credential_service.set_ai_api_key(previous_saved_key)
+                    else:
+                        self.credential_service.delete_ai_api_key()
+                except CredentialError:
+                    logging.getLogger(__name__).exception('Unable to roll back an AI key after setup failed.')
+            QMessageBox.warning(self.onboarding_dialog, 'Unable to save AI setup', str(exc))
+            return
+        self.config = candidate
+        self.main_window.config = candidate
+        self.main_window.pages['settings'].refresh(candidate)
+        self.main_window.pages['evaluation'].max_evaluation_cases = candidate.max_evaluation_cases
+        os.environ['AI_BASE_URL'] = candidate.ai_base_url
+        os.environ['AI_MODEL'] = candidate.ai_model
+        if key:
+            os.environ['AI_API_KEY'] = key
+            self.api_key_source = 'credential'
+            self.api_key_stored = True
+        if self.onboarding_dialog:
+            self.onboarding_dialog.accept()
+
+    def test_onboarding_capture(self) -> None:
+        dialog = self.onboarding_dialog
+        if dialog is None or self.quitting:
+            return
+        if self.capturing or self.workers:
+            dialog.set_capture_test_result(False, 'Finish the current capture or AI request before testing capture.')
+            return
+        self._onboarding_capture_test = True
+        dialog.hide()
+        self.capture()
+
+    def finish_onboarding_capture_test(self, succeeded: bool, message: str) -> None:
+        self._onboarding_capture_test = False
+        self.image_bytes = b''
+        if self._restore_home_after_capture:
+            self.main_window.show()
+            self._restore_home_after_capture = False
+        self.result.hide()
+        dialog = self.onboarding_dialog
+        if dialog is not None and not self.quitting:
+            dialog.set_capture_test_result(succeeded, message)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
+    def open_settings_from_onboarding(self) -> None:
+        if self.onboarding_dialog is not None:
+            self.onboarding_dialog.reject()
+        self.open_settings()
+
+    def onboarding_finished(self, result: int) -> None:
+        if result == QDialog.DialogCode.Rejected:
+            self.mark_onboarding_complete()
+        self.onboarding_dialog = None
+
+    def mark_onboarding_complete(self) -> None:
+        completed = replace(self.config, onboarding_complete=True)
+        try:
+            save_config(completed, self.paths.config_file)
+        except OSError as exc:
+            QMessageBox.warning(self.main_window, "Unable to save setup status", str(exc))
+        self.config = completed
+        self.main_window.config = completed
+
+
+    def remove_saved_api_key(self) -> None:
+        if not self.api_key_stored:
+            return
+        answer = QMessageBox.question(
+            self.settings,
+            "Remove saved API key?",
+            "Remove the saved AI API key from Windows Credential Manager?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.credential_service.delete_ai_api_key()
+        except CredentialError as exc:
+            QMessageBox.warning(self.settings, "Unable to remove API key", str(exc))
+            return
+        self.api_key_stored = False
+        if self.api_key_source == "credential":
+            if self._environment_api_key:
+                os.environ["AI_API_KEY"] = self._environment_api_key
+                self.api_key_source = "environment"
+            else:
+                os.environ.pop("AI_API_KEY", None)
+                self.api_key_source = ""
+        if self.settings:
+            self.settings.key.clear()
+            self.settings.refresh_api_key_state(
+                configured=bool(os.getenv("AI_API_KEY")), stored=False)
+
+    def export_backup(self) -> None:
+        self.paths.backup_dir.mkdir(parents=True, exist_ok=True)
+        default_name = self.paths.backup_dir / f"SnapFlow-Backup-{datetime.now():%Y-%m-%d}.zip"
+        destination, _ = QFileDialog.getSaveFileName(
+            self.main_window, "Export SnapFlow Backup", str(default_name), "SnapFlow Backup (*.zip)")
+        if not destination:
+            return
+        try:
+            result = self.backup_service.export_backup(destination)
+        except (BackupError, OSError) as exc:
+            QMessageBox.warning(self.main_window, "Unable to export backup", str(exc))
+            return
+        QMessageBox.information(self.main_window, "Backup exported", f"Backup saved to:\n{result}")
+
+    def restore_backup(self) -> None:
+        if self.capturing or self.workers or self.workflow_jobs or self.integration_jobs:
+            QMessageBox.warning(
+                self.main_window,
+                "Finish active work first",
+                "Wait for screenshot analysis, Workflow runs, and integration requests to finish before restoring data.",
+            )
+            return
+        source, _ = QFileDialog.getOpenFileName(
+            self.main_window, "Choose a SnapFlow Backup", str(self.paths.backup_dir), "SnapFlow Backup (*.zip)")
+        if not source:
+            return
+        try:
+            inspection = self.backup_service.inspect_backup(source)
+        except BackupError as exc:
+            QMessageBox.warning(self.main_window, "Backup could not be validated", str(exc))
+            return
+        categories = ", ".join(item.replace("_", " ").title() for item in inspection.categories)
+        total_mb = inspection.total_size_bytes / (1024 * 1024)
+        answer = QMessageBox.question(
+            self.main_window,
+            "Restore SnapFlow Backup?",
+            f"This backup contains {inspection.file_count} files ({total_mb:.1f} MB):\n{categories or 'No categories'}\n\n"
+            "A backup of your current data will be created first. API keys and OAuth credentials are not included. "
+            "SnapFlow will close after restoring so it can load the restored data. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            result = self.backup_service.restore_backup(source)
+        except BackupError as exc:
+            QMessageBox.critical(self.main_window, "Restore failed", str(exc))
+            return
+        QMessageBox.information(
+            self.main_window,
+            "Backup restored",
+            f"SnapFlow restored your data. Your previous data is backed up at:\n{result.current_backup}\n\n"
+            "SnapFlow will now close. Reopen it to use the restored data.",
+        )
+        self.quit()
+
+    def open_data_folder(self) -> None:
+        self.paths.data_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths.data_dir)))
+
+    def refresh_storage_usage(self) -> None:
+        try:
+            size = self.backup_service.storage_usage()
+        except OSError as exc:
+            QMessageBox.warning(self.main_window, "Unable to read storage usage", str(exc))
+            return
+        self.main_window.pages["settings"].set_storage_usage(size)
+
+    def run_health_check(self) -> None:
+        if self.health_check_worker is not None or self.quitting:
+            return
+        page = self.main_window.pages.get('settings')
+        if page is not None:
+            page.set_health_check_running(True)
+        worker = BasicHealthCheckWorker(self.diagnostics_service)
+        self.health_check_worker = worker
+        worker.signals.finished.connect(self.health_check_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(object)
+    def health_check_finished(self, result) -> None:
+        self.health_check_worker = None
+        page = self.main_window.pages.get('settings')
+        if page is not None:
+            page.set_health_check_result(result)
+
+    def record_api_usage(self, event) -> None:
+        try:
+            self.usage_storage.record(event)
+            summary = self.usage_storage.monthly_summary(session_start=self.usage_session_started)
+            self.api_usage_changed.emit(summary)
+            self.maybe_warn_monthly_cost(summary)
+        except (OSError, ValueError, sqlite3.Error):
+            logging.getLogger(__name__).warning("Unable to save provider token usage.")
+
+    def maybe_warn_monthly_cost(self, summary) -> None:
+        threshold = self.config.monthly_cost_warning_usd
+        if (threshold > 0 and summary.estimated_cost_usd is not None
+                and summary.estimated_cost_usd >= threshold
+                and self.usage_storage.claim_monthly_warning(summary.month)):
+            self.monthly_cost_warning.emit(summary.estimated_cost_usd)
+
+    def refresh_usage_summary(self) -> None:
+        try:
+            summary = self.usage_storage.monthly_summary(session_start=self.usage_session_started)
+        except (OSError, sqlite3.Error):
+            logging.getLogger(__name__).warning("Unable to load provider token usage.", exc_info=True)
+            return
+        self.update_usage_summary(summary)
+        self.maybe_warn_monthly_cost(summary)
+
+    @Slot(object)
+    def update_usage_summary(self, summary) -> None:
+        page = self.main_window.pages.get("settings") if hasattr(self, "main_window") else None
+        if page is not None:
+            page.set_usage_summary(summary, self.config.monthly_cost_warning_usd)
+
+    @Slot(float)
+    def show_monthly_cost_warning(self, estimated_cost) -> None:
+        self.tray.showMessage(
+            f"{APP_NAME} usage warning",
+            f"Estimated AI spend this month has reached ${estimated_cost:.2f}. "
+            "Check provider billing for the actual amount.")
+
+    def check_for_updates(self, manual=True) -> None:
+        if self.update_worker is not None:
+            return
+        page = self.main_window.pages.get('settings')
+        if page is not None:
+            page.set_update_status('Checking the configured GitHub Releases source…', checking=True)
+        worker = UpdateCheckWorker()
+        self.update_worker = worker
+        worker.signals.finished.connect(self.update_check_finished)
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(object, str)
+    def update_check_finished(self, result, error) -> None:
+        self.update_worker = None
+        page = self.main_window.pages.get('settings')
+        if page is not None:
+            page.set_update_status('Unable to check for updates. Check your connection and try again.')
+        if result is None:
+            return
+        if result.error_code == 'no_release':
+            message = 'No published release is available from the configured source yet.'
+        elif result.error_code:
+            message = 'Unable to check for updates. Check your connection and try again.'
+        elif result.release and result.release.is_newer:
+            release = result.release
+            message = f'Version {release.tag_name} is available.'
+            if page is not None:
+                page.set_update_status(message)
+            dialog = UpdateDialog(release, self.main_window)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                opened = QDesktopServices.openUrl(QUrl(official_release_page()))
+                if not opened and page is not None:
+                    page.set_update_status('The release page could not be opened. Visit the SnapFlow releases page on GitHub.')
+            return
+        else:
+            message = f'{APP_NAME} {APP_VERSION} is up to date.'
+        if page is not None:
+            page.set_update_status(message)
+
+    def export_support_bundle(self) -> None:
+        self.paths.backup_dir.mkdir(parents=True, exist_ok=True)
+        default_name = self.paths.backup_dir / f"SnapFlow-Support-{datetime.now():%Y-%m-%d}.zip"
+        destination, _ = QFileDialog.getSaveFileName(
+            self.main_window, "Export Support Bundle", str(default_name), "ZIP archive (*.zip)")
+        if not destination:
+            return
+        answer = QMessageBox.question(
+            self.main_window,
+            "Export sanitized diagnostics?",
+            "The local ZIP contains SnapFlow version and OS/Python/Qt details plus sanitized application logs. "
+            "It excludes screenshots, extracted data, settings, Workflows, databases, API keys, and integration credentials. "
+            "SnapFlow will not send it anywhere. Review it before sharing. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            bundle = self.diagnostics_service.export_bundle(destination)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self.main_window, "Unable to export support bundle", str(exc))
+            return
+        QMessageBox.information(self.main_window, "Support bundle exported", f"Bundle saved to:\n{bundle}")
+
     def apply_settings(self, config: Config, key: str) -> None:
         previous = self.config
+        if key and not config.onboarding_complete:
+            config = replace(config, onboarding_complete=True)
+        previous_saved_key = None
+        credential_updated = False
         try:
             self.hotkeys.register(config.hotkey)
+            if key:
+                previous_saved_key = self.credential_service.get_ai_api_key()
+                self.credential_service.set_ai_api_key(key)
+                credential_updated = True
+            save_config(config, self.paths.config_file)
+        except (CredentialError, OSError, ValueError) as exc:
+            if credential_updated:
+                try:
+                    if previous_saved_key:
+                        self.credential_service.set_ai_api_key(previous_saved_key)
+                    else:
+                        self.credential_service.delete_ai_api_key()
+                except CredentialError:
+                    logging.getLogger(__name__).exception("Unable to roll back an API key after settings save failed.")
             try:
-                save_config(config)
-            except OSError:
                 self.hotkeys.register(previous.hotkey)
-                raise
-        except (OSError, ValueError) as exc:
+            except ValueError:
+                logging.getLogger(__name__).exception("Unable to restore the previous hotkey after settings save failed.")
             QMessageBox.warning(self.settings, "Unable to save settings", str(exc))
             return
         self.config = config
         self.main_window.config = config
+        if config.ai_base_url is not None:
+            os.environ['AI_BASE_URL'] = config.ai_base_url
+        if config.ai_model is not None:
+            os.environ['AI_MODEL'] = config.ai_model
         self.main_window.pages['settings'].refresh(config)
+        self.main_window.pages['evaluation'].max_evaluation_cases = config.max_evaluation_cases
         self.theme_manager.set_preference(config.theme)
         self.main_window.hotkey_label.setText(' + '.join(part.capitalize() for part in config.hotkey.split('+')))
         if key:
             os.environ["AI_API_KEY"] = key
-        visible = self.result.isVisible()
-        self.result.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, config.always_on_top)
-        if visible:
-            self.result.show()
+            self.api_key_source = "credential"
+            self.api_key_stored = True
+        self.settings.refresh_api_key_state(
+            configured=bool(os.getenv("AI_API_KEY")), stored=self.api_key_stored)
+        self.result.set_focus_topmost_enabled(config.always_on_top)
         self.settings.key.clear()
         self.settings.accept()
+        self.refresh_usage_summary()
         self.change_mode(config.default_mode)
+        if config.automatic_update_checks and not previous.automatic_update_checks:
+            QTimer.singleShot(1000, self.check_for_updates)
+
+    def report_error(self, error: Exception, *, context=None) -> None:
+        report = classify_error(error, context=context)
+        logging.getLogger(__name__).error(
+            'User-visible failure category=%s reference=%s',
+            report.category, report.reference_id,
+            exc_info=(type(error), error, error.__traceback__))
+        self.show_error(f'{report.user_message}\nReference ID: {report.reference_id}')
 
     def show_error(self, message: str) -> None:
         self.result.set_response(message, error=True)

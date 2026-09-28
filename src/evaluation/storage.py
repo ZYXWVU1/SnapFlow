@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from src.database import initialize_learning_database
+
 
 @dataclass(frozen=True)
 class EvaluationReport:
@@ -25,6 +27,7 @@ class EvaluationStorage:
     def __init__(self, feedback_storage, path=None):
         self.feedback_storage = feedback_storage
         self.path = Path(path) if path is not None else feedback_storage.path
+        initialize_learning_database(self.path)
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS evaluation_runs (
                 id TEXT PRIMARY KEY, skill_id TEXT NOT NULL, skill_version_id TEXT NOT NULL,

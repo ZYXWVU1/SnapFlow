@@ -9,6 +9,8 @@ import site
 import subprocess
 import sys
 
+from src.app_version import APP_NAME
+
 
 REQUIRED_MODULES = {
     "PySide6": "PySide6",
@@ -94,6 +96,16 @@ def _install_dependencies(requirements_file: Path, missing: list[str]) -> None:
 
 def ensure_dependencies() -> None:
     """Install missing runtime packages before any third-party import occurs."""
+    if getattr(sys, "frozen", False):
+        missing = _missing_modules()
+        if missing:
+            names = ", ".join(REQUIRED_MODULES[module] for module in missing)
+            raise DependencyError(
+                "The SnapFlow packaged runtime is missing bundled packages: " + names +
+                ". Reinstall the application or contact support."
+            )
+        return
+
     _add_user_site_to_import_path()
     missing = _missing_modules()
     if not missing:
@@ -119,6 +131,6 @@ def show_dependency_error(error: DependencyError) -> None:
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, "AI Screenshot Helper", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
     except (AttributeError, OSError):
         print(message, file=sys.stderr)

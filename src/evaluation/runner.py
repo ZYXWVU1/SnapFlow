@@ -32,7 +32,7 @@ class EvaluationRunner:
         self.report_storage = report_storage
         self.client = client
 
-    def evaluate(self, version_id, dataset_id, model_config_id):
+    def evaluate(self, version_id, dataset_id, model_config_id, max_cases=None):
         version = self.version_manager.get(version_id)
         dataset = self.dataset_storage.get(dataset_id)
         if version is None or dataset is None or version.skill_id != dataset.skill_id:
@@ -40,8 +40,15 @@ class EvaluationRunner:
         definition = CustomSkillDefinition.from_dict(version.definition_snapshot)
         skill = RuntimeCustomSkill(definition)
         fields = [(f.id, f.field_type, f.required) for f in definition.fields]
+        examples = self.dataset_storage.available_examples(dataset)
+        if max_cases is not None:
+            if type(max_cases) is not int or max_cases < 1:
+                raise ValueError('Evaluation case limit must be a positive integer.')
+            examples = examples[:max_cases]
+        usage_options = ({'model_override': model_config_id, 'usage_operation': 'evaluation'}
+                         if hasattr(self.client, 'usage_callback') else {})
         metric_cases, case_results, failures = [], [], []
-        for example in self.dataset_storage.available_examples(dataset):
+        for example in examples:
             if not example.screenshot_reference:
                 failures.append(f'{example.id}: no saved screenshot')
                 continue
@@ -51,10 +58,10 @@ class EvaluationRunner:
                 failures.append(f'{example.id}: screenshot unavailable')
                 continue
             start = time.perf_counter()
-            prediction = CustomSkillMatcher(self.client).match(image, [definition])
+            prediction = CustomSkillMatcher(self.client, **usage_options).match(image, [definition])
             actual, valid, errors = {}, False, []
             try:
-                response = self.client.request_image(image, skill.prompt(), mode='skill')
+                response = self.client.request_image(image, skill.prompt(), mode='skill', **usage_options)
                 extracted = skill.parse(response, prediction.confidence)
                 actual = extracted.data
                 errors = list(extracted.warnings)
@@ -75,6 +82,6 @@ class EvaluationRunner:
         prompt_hash = hashlib.sha256((definition.detection_prompt + '\n' + skill.prompt()).encode('utf-8')).hexdigest()
         report = EvaluationReport(uuid4().hex, version.skill_id, version_id, dataset.id,
             dataset.revision, str(model_config_id), prompt_hash,
-            datetime.now(timezone.utc).isoformat(), len(dataset.example_ids), metrics, failures)
+            datetime.now(timezone.utc).isoformat(), len(examples), metrics, failures)
         self.report_storage.save(report, case_results)
         return report

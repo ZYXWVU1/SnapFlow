@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from src.database import initialize_learning_database
+
 DATASET_TYPES = frozenset({'development', 'validation', 'locked_test'})
 
 
@@ -25,6 +27,7 @@ class DatasetStorage:
     def __init__(self, feedback_storage, path=None):
         self.feedback_storage = feedback_storage
         self.path = Path(path) if path is not None else feedback_storage.path
+        initialize_learning_database(self.path)
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS evaluation_datasets (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, skill_id TEXT NOT NULL,

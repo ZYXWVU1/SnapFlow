@@ -3,12 +3,17 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from src.prompts import MODES, ALIASES
+from src.paths import AppPaths
 
-ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = ROOT / "config.json"
+DEFAULT_PATHS = AppPaths()
+ROOT = DEFAULT_PATHS.resource_root
+CONFIG_PATH = DEFAULT_PATHS.config_file
 SMART_CLASSIFICATION_THRESHOLD = 0.75
+DEFAULT_AI_BASE_URL = 'https://api.openai.com/v1'
+DEFAULT_AI_MODEL = 'gpt-4.1-mini'
 
 
 def parse_hotkey(value: str) -> tuple[int, int]:
@@ -27,11 +32,17 @@ def parse_hotkey(value: str) -> tuple[int, int]:
 @dataclass(frozen=True)
 class Config:
     hotkey: str = "ctrl+shift+s"
-    default_mode: str = "ask"
+    default_mode: str = "smart"
     max_image_width: int = 1920
     always_on_top: bool = True
     smart_classification_threshold: float = SMART_CLASSIFICATION_THRESHOLD
     theme: str = 'system'
+    onboarding_complete: bool = False
+    monthly_cost_warning_usd: float = 5.0
+    max_evaluation_cases: int = 100
+    automatic_update_checks: bool = False
+    ai_base_url: str | None = None
+    ai_model: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.default_mode, str):
@@ -50,6 +61,42 @@ class Config:
             raise ValueError('Smart classification threshold must be between 0 and 1.')
         if self.theme not in ('system', 'light', 'dark'):
             raise ValueError('Theme must be System, Light, or Dark.')
+        if type(self.onboarding_complete) is not bool:
+            raise ValueError('Onboarding completion must be true or false.')
+        warning = self.monthly_cost_warning_usd
+        if type(warning) not in (int, float) or not math.isfinite(warning) or not 0 <= warning <= 1000000:
+            raise ValueError('Monthly cost warning must be between 0 and 1,000,000 USD.')
+        if type(self.max_evaluation_cases) is not int or not 1 <= self.max_evaluation_cases <= 10000:
+            raise ValueError('Maximum Evaluation cases must be between 1 and 10,000.')
+        if type(self.automatic_update_checks) is not bool:
+            raise ValueError('Automatic update checks must be true or false.')
+        if self.ai_base_url is not None:
+            if not isinstance(self.ai_base_url, str):
+                raise ValueError('AI endpoint must be text.')
+            endpoint = self.ai_base_url.strip()
+            try:
+                parsed = urlsplit(endpoint)
+                hostname = (parsed.hostname or '').lower()
+                _port = parsed.port
+                valid_endpoint = (
+                    parsed.scheme in ('https', 'http') and bool(hostname)
+                    and not any(character.isspace() for character in endpoint)
+                    and parsed.username is None and parsed.password is None
+                    and not parsed.query and not parsed.fragment
+                    and (parsed.scheme == 'https' or hostname in ('localhost', '127.0.0.1', '::1'))
+                )
+            except ValueError:
+                valid_endpoint = False
+            if not valid_endpoint:
+                raise ValueError('Use an HTTPS AI endpoint, or HTTP on localhost only.')
+            object.__setattr__(self, 'ai_base_url', endpoint.rstrip('/'))
+        if self.ai_model is not None:
+            if not isinstance(self.ai_model, str):
+                raise ValueError('AI model must be text.')
+            model = self.ai_model.strip()
+            if not model or len(model) > 128:
+                raise ValueError('AI model must contain 1 to 128 characters.')
+            object.__setattr__(self, 'ai_model', model)
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:

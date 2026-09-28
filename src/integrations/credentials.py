@@ -3,6 +3,7 @@ import ctypes
 from ctypes import wintypes
 import os
 
+from src.app_version import APP_NAME
 from .models import valid_id
 
 
@@ -11,6 +12,8 @@ class CredentialError(RuntimeError):
 
 
 class CredentialService:
+    _AI_API_KEY_TARGET = f'{APP_NAME}:provider:ai_api_key'
+
     def __init__(self, backend=None):
         self.backend = backend if backend is not None else WindowsCredentialBackend()
 
@@ -28,6 +31,19 @@ class CredentialService:
 
     def delete(self, integration_id):
         self.backend.delete(self._target(integration_id))
+
+    def get_ai_api_key(self):
+        return self.backend.get(self._AI_API_KEY_TARGET)
+
+    def set_ai_api_key(self, secret):
+        if not isinstance(secret, str) or not secret.strip():
+            raise ValueError('AI API key must be non-empty text.')
+        if len(secret.encode('utf-8')) > 2560:
+            raise CredentialError('AI API key is too large for OS storage.')
+        self.backend.set(self._AI_API_KEY_TARGET, secret)
+
+    def delete_ai_api_key(self):
+        self.backend.delete(self._AI_API_KEY_TARGET)
 
 
 class _FILETIME(ctypes.Structure):
@@ -76,7 +92,7 @@ class WindowsCredentialBackend:
         credential.CredentialBlobSize = len(encoded)
         credential.CredentialBlob = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
         credential.Persist = self._LOCAL_MACHINE
-        credential.UserName = 'Visual Workflow AI'
+        credential.UserName = APP_NAME
         if not self.api.CredWriteW(ctypes.byref(credential), 0):
             raise CredentialError('Unable to save credential in Windows Credential Manager.')
 

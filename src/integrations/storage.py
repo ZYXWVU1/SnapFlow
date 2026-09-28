@@ -5,13 +5,13 @@ from pathlib import Path
 import tempfile
 import threading
 
-from src.skills.custom.storage import default_path
+from src.paths import AppPaths
 from .models import IntegrationConnection
 
 
 class ConnectionStorage:
-    def __init__(self, path=None):
-        self.path = Path(path) if path is not None else default_path().with_name('integrations.json')
+    def __init__(self, path=None, paths=None):
+        self.path = Path(path) if path is not None else (paths or AppPaths()).integrations_file
         self.warning = ''
         self._read_only = False
         self._connections = {}

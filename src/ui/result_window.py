@@ -2,6 +2,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QComboBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
 
+from src.app_version import APP_NAME
 from src.prompts import MODES
 from src.actions import copy_formats
 from src.modes import ModeResult
@@ -11,9 +12,10 @@ from src.ui.skill_view import render_skill
 from src.ui.skill_actions import run_action
 from src.ui.design.components import AppButton, Card, PageHeader
 from src.ui.design.tokens import SPACING
+from src.ui.focus_aware_window import FocusAwareTopmostMixin
 
 
-class ResultWindow(QWidget):
+class ResultWindow(FocusAwareTopmostMixin, QWidget):
     ask = Signal(str)
     mode_changed = Signal(str)
     closed = Signal()
@@ -27,8 +29,8 @@ class ResultWindow(QWidget):
 
     def __init__(self, mode: str, always_on_top: bool) -> None:
         super().__init__()
-        self.setWindowTitle("Visual Workflow AI")
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, always_on_top)
+        self.configure_focus_topmost(always_on_top)
+        self.setWindowTitle(APP_NAME)
         self.resize(720, 680)
         self.setMinimumSize(340, 260)
         layout = QVBoxLayout(self)
@@ -241,6 +243,11 @@ class ResultWindow(QWidget):
         self.notice.setText(text)
         self.notice.setVisible(bool(text))
 
+    def clear_preview(self) -> None:
+        """Release the screenshot pixmap when the preview is no longer visible."""
+        self.preview.clear()
+        self.preview.hide()
+
     def set_busy(self, message: str = 'Analyzing screenshot...') -> None:
         self.clear_actions()
         self.structured.hide()
@@ -248,7 +255,7 @@ class ResultWindow(QWidget):
         self.text.show()
         self.copy.show()
         self.send.setEnabled(False)
-        self.preview.hide()
+        self.clear_preview()
         self.text.setPlainText(message)
         self.copy.setEnabled(False)
         self.again.setEnabled(False)
@@ -260,7 +267,7 @@ class ResultWindow(QWidget):
         self.clear_actions()
         self.structured.hide()
         self.followup_row.hide()
-        self.preview.hide()
+        self.clear_preview()
         self.text.show()
         self.copy.show()
         self.send.setEnabled(True)
@@ -286,5 +293,6 @@ class ResultWindow(QWidget):
             self.ask.emit(question)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.clear_preview()
         self.closed.emit()
         super().closeEvent(event)

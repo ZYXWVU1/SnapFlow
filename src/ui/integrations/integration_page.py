@@ -2,6 +2,7 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout
 
+from src.app_version import APP_NAME
 from src.ui.design.components import AppButton, Badge, PageHeader
 from src.ui.pages.common import NamedCard, ScrollPage
 
@@ -55,7 +56,7 @@ class IntegrationPage(ScrollPage):
         super().__init__(parent)
         self.registry, self.storage = registry, storage
         self.content.addWidget(PageHeader('Integrations',
-            'Connect Visual Workflow AI to the tools you already use.'))
+            f'Connect {APP_NAME} to the tools you already use.'))
         self.cards = {}
         for definition in registry.definitions():
             card = IntegrationCard(definition)

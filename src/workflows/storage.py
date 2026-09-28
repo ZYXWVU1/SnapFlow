@@ -6,13 +6,13 @@ import os
 from pathlib import Path
 import tempfile
 import uuid
-from src.skills.custom.storage import default_path
+from src.paths import AppPaths
 from .models import WorkflowDefinition
 
 
 class WorkflowStorage:
-    def __init__(self, path=None):
-        self.path = Path(path) if path is not None else default_path().with_name('workflows.json')
+    def __init__(self, path=None, paths=None):
+        self.path = Path(path) if path is not None else (paths or AppPaths()).workflows_file
         self.warning = ''
         self._workflows = {}
         self._recover = False

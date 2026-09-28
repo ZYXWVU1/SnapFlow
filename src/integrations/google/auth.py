@@ -11,6 +11,8 @@ import webbrowser
 
 import httpx
 
+from src.app_version import APP_NAME
+
 
 AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 TOKEN_URL = 'https://oauth2.googleapis.com/token'
@@ -146,11 +148,11 @@ class GoogleOAuth:
                     if urlparse(self.path).path != '/':
                         raise OAuthFailure('Invalid authorization callback.')
                     received['code'] = validate_callback(parse_qs(urlparse(self.path).query), state)
-                    message = b'Connection received. You can return to Visual Workflow AI.'
+                    message = f'Connection received. You can return to {APP_NAME}.'.encode('utf-8')
                     self.send_response(200)
                 except OAuthFailure:
                     received['error'] = True
-                    message = b'Connection was not completed. Return to Visual Workflow AI.'
+                    message = f'Connection was not completed. Return to {APP_NAME}.'.encode('utf-8')
                     self.send_response(400)
                 self.send_header('Content-Type', 'text/plain; charset=utf-8')
                 self.send_header('Content-Length', str(len(message)))

@@ -3,12 +3,12 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from src.skills.custom.storage import default_path
+from src.paths import AppPaths
 
 
 class WorkflowHistory:
-    def __init__(self, path=None, limit=100):
-        self.path = Path(path) if path is not None else default_path().with_name('workflow_history.json')
+    def __init__(self, path=None, limit=100, paths=None):
+        self.path = Path(path) if path is not None else (paths or AppPaths()).workflow_history_file
         self.limit = limit
         self.warning = ''
         self._entries = []

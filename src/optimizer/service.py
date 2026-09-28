@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from src.database import initialize_learning_database
 from src.skills.custom.json_response import json_object
 from src.skills.custom.models import CustomSkillDefinition
 
@@ -32,6 +33,7 @@ class SkillOptimizer:
         self.version_manager, self.client = version_manager, client
         self.report_storage = report_storage
         self.path = Path(path) if path is not None else feedback_storage.path
+        initialize_learning_database(self.path)
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS optimization_proposals (
                 id TEXT PRIMARY KEY, skill_id TEXT NOT NULL, source_version_id TEXT NOT NULL,

@@ -7,11 +7,12 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
-from src.skills.custom.storage import default_path as skills_path
+from src.database import initialize_learning_database
+from src.paths import AppPaths
 
 
-def default_path():
-    return skills_path().with_name('learning.sqlite3')
+def default_path(paths=None):
+    return (paths or AppPaths()).learning_database
 
 
 @dataclass(frozen=True)
@@ -28,10 +29,11 @@ class FeedbackRecord:
 
 
 class FeedbackStorage:
-    def __init__(self, path=None):
-        self.path = Path(path) if path is not None else default_path()
+    def __init__(self, path=None, paths=None):
+        self.path = Path(path) if path is not None else default_path(paths)
         self.image_dir = self.path.parent / 'verified_images'
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        initialize_learning_database(self.path)
         with self._connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS verified_examples (
                 id TEXT PRIMARY KEY, skill_id TEXT NOT NULL, skill_version_id TEXT,

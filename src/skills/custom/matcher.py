@@ -16,15 +16,22 @@ class CustomSkillMatchResult:
 
 
 class CustomSkillMatcher:
-    def __init__(self, client):
+    def __init__(self, client, *, model_override=None, usage_operation=None):
         self.client = client
+        self.model_override, self.usage_operation = model_override, usage_operation
 
     def match(self, image_bytes, definitions):
         definitions = [s for s in definitions if s.enabled]
         if not definitions:
             return CustomSkillMatchResult()
         try:
-            raw = json_object(self.client.request_image(image_bytes, matcher_prompt(definitions), mode='custom_match'))
+            options = {}
+            if self.model_override is not None:
+                options['model_override'] = self.model_override
+            if self.usage_operation is not None:
+                options['usage_operation'] = self.usage_operation
+            raw = json_object(self.client.request_image(
+                image_bytes, matcher_prompt(definitions), mode='custom_match', **options))
             skill_id, confidence = raw.get('skill_id'), raw.get('confidence')
             if not valid_confidence(confidence) or (skill_id is not None and
                     (not isinstance(skill_id, str) or skill_id not in {s.id for s in definitions})):

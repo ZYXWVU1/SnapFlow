@@ -34,4 +34,16 @@ def stylesheet(colors: Palette) -> str:
         border-radius: {RADIUS['control']}px; padding: 5px 8px; selection-background-color: {colors.accent};
     }}
     QScrollArea {{ border: 0; background: transparent; }}
+    QScrollBar:vertical {{ background: {colors.surface_alt}; width: 16px; margin: 0; border-radius: 8px; }}
+    QScrollBar::handle:vertical {{ background: {colors.text_muted}; min-height: 40px;
+                                   margin: 2px; border-radius: 6px; }}
+    QScrollBar::handle:vertical:hover {{ background: {colors.accent}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+    QScrollBar:horizontal {{ background: {colors.surface_alt}; height: 16px; margin: 0; border-radius: 8px; }}
+    QScrollBar::handle:horizontal {{ background: {colors.text_muted}; min-width: 40px;
+                                     margin: 2px; border-radius: 6px; }}
+    QScrollBar::handle:horizontal:hover {{ background: {colors.accent}; }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
     """

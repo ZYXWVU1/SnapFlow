@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from src.database import initialize_learning_database
 from src.skills.custom.models import CustomSkillDefinition
 from src.skills.custom.runtime_skill import RuntimeCustomSkill
 from src.skills.registry import SkillRegistry
@@ -31,6 +32,7 @@ class SkillVersionManager:
         self.workflow_storage = workflow_storage
         self.path = Path(path) if path is not None else skill_storage.path.with_name('learning.sqlite3')
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        initialize_learning_database(self.path)
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS skill_versions (
                 version_id TEXT PRIMARY KEY, skill_id TEXT NOT NULL, version_label TEXT NOT NULL,

@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QScrollArea,
     QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
+from src.app_version import APP_NAME
 from src.ui.design.components import AppButton, Badge, Card, PageHeader, ToastManager
 from src.ui.design.icons import icon
 from src.ui.design.tokens import SPACING
@@ -35,17 +36,27 @@ class MainWindow(QMainWindow):
     skill_test_requested = Signal(str)
     workflow_edit_requested = Signal(str)
     workflow_test_requested = Signal(str)
+    backup_export_requested = Signal()
+    backup_restore_requested = Signal()
+    open_data_folder_requested = Signal()
+    storage_usage_requested = Signal()
+    support_bundle_requested = Signal()
+    health_check_requested = Signal()
+    usage_summary_requested = Signal()
+    update_check_requested = Signal()
+    onboarding_requested = Signal()
 
     def __init__(self, hotkey, parent=None, *, skills_storage=None, workflows_storage=None,
-                 history=None, config=None, integration_registry=None, connection_storage=None):
+                 history=None, config=None, integration_registry=None, connection_storage=None, paths=None):
         super().__init__(parent)
         self.setObjectName('AppShell')
-        self.setWindowTitle('Visual Workflow AI')
+        self.setWindowTitle(APP_NAME)
         self.setMinimumSize(620, 480)
         self.resize(1020, 700)
         self.current_page = 'home'
         self.skills_storage, self.workflows_storage = skills_storage, workflows_storage
         self.history, self.config = history, config
+        self.paths = paths
         self.connection_storage = connection_storage
         root = QWidget()
         self.setCentralWidget(root)
@@ -59,7 +70,7 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout(self.sidebar)
         side.setContentsMargins(SPACING['md'], SPACING['xl'], SPACING['md'], SPACING['lg'])
         side.setSpacing(SPACING['sm'])
-        self.brand = QLabel('Visual Workflow AI')
+        self.brand = QLabel(APP_NAME)
         brand_font = self.brand.font()
         brand_font.setPointSize(13)
         brand_font.setBold(True)
@@ -112,8 +123,17 @@ class MainWindow(QMainWindow):
                 widget.test_requested.connect(self.integration_test_requested)
                 widget.disconnect_requested.connect(self.integration_disconnect_requested)
             elif page == 'settings':
-                widget = SettingsPage(config)
+                widget = SettingsPage(config, paths=paths)
                 widget.edit_requested.connect(lambda: self.feature_requested.emit('settings'))
+                widget.backup_export_requested.connect(self.backup_export_requested)
+                widget.backup_restore_requested.connect(self.backup_restore_requested)
+                widget.open_data_folder_requested.connect(self.open_data_folder_requested)
+                widget.storage_usage_requested.connect(self.storage_usage_requested)
+                widget.support_bundle_requested.connect(self.support_bundle_requested)
+                widget.health_check_requested.connect(self.health_check_requested)
+                widget.usage_summary_requested.connect(self.usage_summary_requested)
+                widget.update_check_requested.connect(self.update_check_requested)
+                widget.onboarding_requested.connect(self.onboarding_requested)
                 self.launch_buttons[page] = widget.edit_button
             else:
                 widget = self._build_feature_page(page)

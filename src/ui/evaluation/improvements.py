@@ -26,16 +26,23 @@ class ProposalWorker(QRunnable):
 
 
 class CandidateEvaluationWorker(QRunnable):
-    def __init__(self, optimizer, runner, candidate, dataset_id, model_id):
+    def __init__(self, optimizer, runner, candidate, dataset_id, model_id, max_cases=None):
         super().__init__()
         self.optimizer, self.runner, self.candidate = optimizer, runner, candidate
         self.dataset_id, self.model_id = dataset_id, model_id
+        self.max_cases = max_cases
         self.signals = ImprovementSignals()
 
     def run(self):
         try:
-            baseline = self.runner.evaluate(self.candidate.source_version_id, self.dataset_id, self.model_id)
-            proposed = self.runner.evaluate(self.candidate.candidate_version_id, self.dataset_id, self.model_id)
+            if self.max_cases is None:
+                baseline = self.runner.evaluate(self.candidate.source_version_id, self.dataset_id, self.model_id)
+                proposed = self.runner.evaluate(self.candidate.candidate_version_id, self.dataset_id, self.model_id)
+            else:
+                baseline = self.runner.evaluate(self.candidate.source_version_id, self.dataset_id, self.model_id,
+                                                max_cases=self.max_cases)
+                proposed = self.runner.evaluate(self.candidate.candidate_version_id, self.dataset_id, self.model_id,
+                                                max_cases=self.max_cases)
             candidate = self.optimizer.mark_evaluated(self.candidate.id, baseline.id, proposed.id)
             self.signals.finished.emit(candidate, '')
         except Exception as exc:

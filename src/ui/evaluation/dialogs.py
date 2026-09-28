@@ -1,15 +1,17 @@
 """Dataset selection and inspection of measured evaluation cases."""
 from pathlib import Path
+import os
 import sqlite3
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QComboBox, QDialog, QFormLayout, QHBoxLayout, QLabel,
                               QLineEdit, QListWidget, QAbstractItemView, QMessageBox,
-                              QPushButton, QScrollArea, QVBoxLayout, QWidget)
+                              QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from src.ui.feedback.example_library import display_fields
 from src.evaluation.config import current_model_identifier
+from src.usage import normalize_provider
 
 
 class DatasetDialog(QDialog):
@@ -69,9 +71,11 @@ class DatasetDialog(QDialog):
 
 
 class RunDialog(QDialog):
-    def __init__(self, datasets, versions, parent=None):
+    def __init__(self, datasets, versions, parent=None, *, usage_storage=None, max_cases=100):
         super().__init__(parent)
         self.datasets, self.versions = datasets, versions
+        self.usage_storage = usage_storage
+        self.max_cases = max(1, int(max_cases))
         self.setWindowTitle('Run Evaluation')
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -80,12 +84,26 @@ class RunDialog(QDialog):
             self.dataset.addItem(f'{entry.name} · {entry.dataset_type}', entry.id)
         self.version = QComboBox()
         self.model = QLineEdit(current_model_identifier())
+        self.case_limit = QSpinBox()
+        self.case_limit.setRange(1, self.max_cases)
         form.addRow('Dataset', self.dataset)
         form.addRow('Skill version', self.version)
         form.addRow('Model identifier', self.model)
+        form.addRow('Cases to evaluate', self.case_limit)
         layout.addLayout(form)
+        self.cost_preview = QLabel()
+        self.cost_preview.setWordWrap(True)
+        self.cost_preview.setTextFormat(Qt.TextFormat.PlainText)
+        self.cost_preview.setProperty('role', 'muted')
+        layout.addWidget(self.cost_preview)
         self.dataset.currentIndexChanged.connect(self.refresh_versions)
+        self.dataset.currentIndexChanged.connect(self.refresh_cost_preview)
+        self.model.textChanged.connect(self.refresh_cost_preview)
+        self.dataset.currentIndexChanged.connect(self.refresh_case_limit)
+        self.case_limit.valueChanged.connect(self.refresh_cost_preview)
+        self.refresh_case_limit()
         self.refresh_versions()
+        self.refresh_cost_preview()
         self.error = QLabel()
         layout.addWidget(self.error)
         row = QHBoxLayout()
@@ -102,6 +120,38 @@ class RunDialog(QDialog):
         if dataset:
             for entry in self.versions.list_versions(dataset.skill_id):
                 self.version.addItem(entry.version_label + ' · ' + entry.status, entry.version_id)
+
+    def refresh_cost_preview(self):
+        dataset = self.datasets.get(self.dataset.currentData())
+        available_count = len(self.datasets.available_examples(dataset)) if dataset else 0
+        case_count = min(self.case_limit.value(), available_count) if available_count else 0
+        provider = os.getenv('AI_BASE_URL') or 'https://api.openai.com/v1'
+        provider_name = normalize_provider(provider)
+        model = self.model.text().strip()
+        if self.usage_storage is None:
+            estimate = None
+        else:
+            estimate = self.usage_storage.evaluation_preview(case_count, provider, model)
+        requests = estimate.request_count if estimate is not None else case_count * 2
+        if estimate is not None and estimate.estimated_cost_usd is not None:
+            note = (f"Up to {requests} AI requests via {provider_name} / {model} for {case_count} of "
+                    f"{available_count} available cases. Estimated cost: "
+                    f"about ${estimate.estimated_cost_usd:.4f}, based on {estimate.sample_count} recent evaluation request(s). "
+                    "Actual charges depend on image complexity and provider pricing.")
+        else:
+            note = (f"Up to {requests} AI requests via {provider_name} / {model} for {case_count} of "
+                    f"{available_count} available cases. Cost estimate is unavailable "
+                    "until usage has been measured for this provider and model; charges may apply.")
+        self.cost_preview.setText(note)
+
+    def refresh_case_limit(self):
+        dataset = self.datasets.get(self.dataset.currentData())
+        available_count = len(self.datasets.available_examples(dataset)) if dataset else 0
+        self.case_limit.setEnabled(available_count > 0)
+        self.case_limit.setMaximum(max(1, min(available_count or 1, self.max_cases)))
+        if self.case_limit.value() > self.case_limit.maximum():
+            self.case_limit.setValue(self.case_limit.maximum())
+        self.refresh_cost_preview()
 
     def submit(self):
         if not self.dataset.currentData() or not self.version.currentData() or not self.model.text().strip():

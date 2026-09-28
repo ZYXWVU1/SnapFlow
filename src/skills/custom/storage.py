@@ -5,17 +5,18 @@ import os
 from pathlib import Path
 import tempfile
 import uuid
+
+from src.paths import AppPaths
 from .models import CustomSkillDefinition
 
 
-def default_path():
-    root = Path(os.environ.get('APPDATA') or Path.home() / '.local' / 'share')
-    return root / 'AI Screenshot Helper' / 'custom_skills.json'
+def default_path(paths=None):
+    return (paths or AppPaths()).custom_skills_file
 
 
 class CustomSkillStorage:
-    def __init__(self, path=None):
-        self.path = Path(path) if path is not None else default_path()
+    def __init__(self, path=None, paths=None):
+        self.path = Path(path) if path is not None else default_path(paths)
         self.warning = ''
         self._skills = {}
         self._recover = False

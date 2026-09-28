@@ -1,20 +1,53 @@
+# Local environments and secrets.
 .venv/
+.build-venv/
+venv/
 .env
-/tests/
+.env.*
+!.env.example
 config.json
+
+# Python caches, test output, and coverage.
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build and release output.
 build/
 dist/
-docs/*
-!docs/PHASE7_IMPLEMENTATION.md
+release/
+/.github/workflows/windows-build.yml
+/packaging/
+/scripts/
+
+# Requested local-only folders and screenshots.
+/docs/
+/tests/
+/assets/screenshots/
+
+# Local user data and temporary files.
+*.log
+*.tmp
+*.bak
+learning.sqlite3*
 
 # Local bundled runtime; distribute this separately if needed.
 .python-runtime/
 python-runtime.zip
 
-# Generated local UI verification image.
+# Generated local UI verification images.
 result-ui-check.png
 smart-ui-check.png
 phase3-ui-check.png
+
+# Operating system metadata.
+.DS_Store
+Thumbs.db
+desktop.ini

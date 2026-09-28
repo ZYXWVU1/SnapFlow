@@ -1,1 +1,1 @@
-"""AI Screenshot Helper."""
+"""SnapFlow."""
