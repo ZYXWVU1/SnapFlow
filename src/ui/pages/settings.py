@@ -19,6 +19,7 @@ class SettingsPage(ScrollPage):
     usage_summary_requested = Signal()
     update_check_requested = Signal()
     onboarding_requested = Signal()
+    memory_rebuild_requested = Signal()
 
     def __init__(self, config=None, parent=None, *, paths=None):
         super().__init__(parent)
@@ -51,6 +52,21 @@ class SettingsPage(ScrollPage):
         note.setProperty('role', 'muted')
         privacy.content.addWidget(note)
         self.content.addWidget(privacy)
+        memory = Card()
+        memory.content.addWidget(QLabel('Visual Memory'))
+        self.memory_status = QLabel()
+        self.memory_status.setWordWrap(True)
+        memory.content.addWidget(self.memory_status)
+        self.rebuild_memory_index = AppButton('Rebuild Memory Search Index')
+        self.rebuild_memory_index.clicked.connect(self.memory_rebuild_requested)
+        memory.content.addWidget(self.rebuild_memory_index)
+        self.content.addWidget(memory)
+        context = Card()
+        context.content.addWidget(QLabel('Contextual Intelligence'))
+        self.context_status = QLabel()
+        self.context_status.setWordWrap(True)
+        context.content.addWidget(self.context_status)
+        self.content.addWidget(context)
 
         diagnostics = Card()
         diagnostics.content.addWidget(QLabel('Diagnostics'))
@@ -152,6 +168,15 @@ class SettingsPage(ScrollPage):
         self.hotkey_label.setText(' + '.join(part.capitalize() for part in config.hotkey.split('+')))
         self.mode_label.setText(config.default_mode.title())
         self.theme_label.setText(config.theme.title())
+        self.memory_status.setText(
+            ('Enabled' if config.visual_memory_enabled else 'Disabled for new saves') +
+            ' · AI questions ' + ('enabled' if config.ai_memory_questions else 'off') +
+            ' · Memory is stored locally until you delete it.')
+        self.context_status.setText(
+            ('Ask with Context enabled' if config.contextual_assistant_enabled else 'Ask with Context disabled') +
+            ' · Whole-library search ' + ('allowed with session permission' if config.context_memory_search_enabled
+                                            else 'off') +
+            ' · New sessions use current screenshot only.')
         self.usage_threshold_label.setText(
             'Monthly warning: disabled' if config.monthly_cost_warning_usd == 0
             else f'Monthly warning: ${config.monthly_cost_warning_usd:.2f}')

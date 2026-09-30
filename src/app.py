@@ -2,6 +2,7 @@
 import os
 import logging
 import sqlite3
+import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -10,6 +11,13 @@ from PySide6.QtGui import QActionGroup, QCursor, QDesktopServices, QIcon, QImage
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon, QStyle
 from src.config import Config, load_config, save_config
 from src.paths import AppPaths
+from src.memory.storage import DuplicateMemoryError, MemoryStore
+from src.memory.recall import MemoryRecallService
+from src.context.models import ContextRequest, ContextSession
+from src.context.permissions import ContextPermissionService
+from src.context.controller import ContextController
+from src.suggestions.service import ActionSuggestionService
+from src.skill_actions import execute_action
 from src.app_version import APP_NAME, APP_VERSION
 from src.backup import BackupError, BackupService
 from src.diagnostics import DiagnosticsService, configure_logging, classify_error
@@ -20,6 +28,8 @@ from src.modes import ModeResult, ResponseFormatError, parse_result
 from src.prompts import MODES
 from src.screenshot import capture_screen, image_to_png_bytes, resize_if_needed
 from src.ui.result_window import ResultWindow
+from src.ui.memory_dialogs import MemorySaveDialog, MemoryDetailDialog
+from src.ui.context_assistant import ContextAssistantDialog
 from src.ui.selection_overlay import SelectionOverlay
 from src.ui.settings_window import SettingsWindow
 from src.ui.onboarding import OnboardingDialog
@@ -89,6 +99,55 @@ class AnalysisWorker(QRunnable):
         self.signals.finished.emit(self.request_id, text, error)
 
 
+class MemoryRecallSignals(QObject):
+    finished = Signal(object, str)
+
+
+class MemoryRecallWorker(QRunnable):
+    def __init__(self, store, client, question, filters):
+        super().__init__()
+        self.signals = MemoryRecallSignals()
+        self.store, self.client = store, client
+        self.question, self.filters = question, filters
+
+    def run(self):
+        try:
+            answer = MemoryRecallService(self.store, self.client).ask(
+                self.question, enabled=True, filters=self.filters)
+            error = ''
+        except (AnalysisError, ValueError, sqlite3.Error) as exc:
+            answer, error = None, str(exc)
+        except Exception:
+            logging.getLogger(__name__).error('Memory question failed.')
+            answer, error = None, 'Unable to answer this Memory question.'
+        self.signals.finished.emit(answer, error)
+
+
+class ContextSignals(QObject):
+    finished = Signal(str, object, str)
+
+
+class ContextWorker(QRunnable):
+    def __init__(self, controller, session, request):
+        super().__init__()
+        self.signals = ContextSignals()
+        self.controller, self.session, self.request = controller, session, request
+
+    def run(self):
+        try:
+            result = self.controller.answer(self.session, self.request)
+            error = ''
+        except AnalysisError:
+            result, error = None, ('Contextual AI is unavailable. '
+                'Your saved memories remain searchable locally.')
+        except (ValueError, OSError, sqlite3.Error) as exc:
+            result, error = None, str(exc)
+        except Exception:
+            logging.getLogger(__name__).error('Contextual answer failed.')
+            result, error = None, 'Unable to answer with the selected context.'
+        self.signals.finished.emit(self.request.request_id, result, error)
+
+
 class ApplicationController(QObject):
     api_usage_changed = Signal(object)
     monthly_cost_warning = Signal(float)
@@ -101,6 +160,20 @@ class ApplicationController(QObject):
         self.diagnostics_service = DiagnosticsService(self.paths)
         self.backup_service = BackupService(self.paths)
         self.usage_storage = UsageStorage(self.paths.learning_database)
+        self.memory_store = MemoryStore(self.paths)
+        self.memory_pool = QThreadPool(self)
+        self.memory_pool.setMaxThreadCount(1)
+        self.memory_recall_worker = None
+        self.context_permissions = ContextPermissionService()
+        self.context_pool = QThreadPool(self)
+        self.context_pool.setMaxThreadCount(1)
+        self.context_workers = {}
+        self.context_session = None
+        self.context_dialog = None
+        self.context_latest_request = None
+        self.context_suggestion_service = ActionSuggestionService(
+            self.memory_store, self.context_permissions)
+        self.context_suggestions = {}
         load_dotenv(self.paths.environment_file)
         self._environment_api_key = os.getenv("AI_API_KEY", "")
         self.api_key_source = "environment" if self._environment_api_key else ""
@@ -157,6 +230,7 @@ class ApplicationController(QObject):
         self.workers: dict[int, AnalysisWorker | ClassificationWorker | SkillExtractionWorker] = {}
         self.request_id = 0
         self.image_bytes = b""
+        self.capture_created_at = None
         self.ask_history: list[dict[str, str]] = []
         self.last_result: ModeResult | SkillResult | None = None
         self.editable_extraction: EditableExtraction | None = None
@@ -173,7 +247,7 @@ class ApplicationController(QObject):
         self.main_window = MainWindow(self.config.hotkey, skills_storage=self.custom_storage,
             workflows_storage=self.workflow_storage, history=self.workflow_history, config=self.config,
             integration_registry=self.integration_registry, connection_storage=self.connection_storage,
-            paths=self.paths)
+            paths=self.paths, memory_store=self.memory_store)
         self.main_window.pages['evaluation'].client = self.client
         self.main_window.pages['evaluation'].usage_storage = self.usage_storage
         self.main_window.pages['evaluation'].max_evaluation_cases = self.config.max_evaluation_cases
@@ -195,18 +269,28 @@ class ApplicationController(QObject):
         self.main_window.usage_summary_requested.connect(self.refresh_usage_summary)
         self.main_window.update_check_requested.connect(self.check_for_updates)
         self.main_window.onboarding_requested.connect(self.show_onboarding)
+        self.main_window.memory_open_requested.connect(self.open_memory_record)
+        self.main_window.memory_ask_requested.connect(self.ask_memory)
+        self.main_window.memory_rebuild_requested.connect(self.rebuild_memory_index)
+        self.main_window.pages['memory'].set_ai_enabled(
+            self.config.visual_memory_enabled and self.config.ai_memory_questions)
         self.api_usage_changed.connect(self.update_usage_summary)
         self.monthly_cost_warning.connect(self.show_monthly_cost_warning)
         self.update_usage_summary(self.usage_storage.monthly_summary(
             session_start=self.usage_session_started))
         self._restore_home_after_capture = False
         self.result = ResultWindow(self.mode, self.config.always_on_top)
+        self.result.memory_save_enabled = (
+            self.config.visual_memory_enabled and self.config.show_memory_save_button)
+        self.result.context_enabled = self.config.contextual_assistant_enabled
         self.result.set_workflow_registry(self.workflow_registry)
         self.result.workflow_requested.connect(self.run_workflow)
         self.result.workflow_cancel_requested.connect(self.cancel_workflow)
         self.result.integration_requested.connect(self.open_integrations)
         self.result.edit_requested.connect(self.edit_result)
         self.result.save_example_requested.connect(self.save_verified_example)
+        self.result.save_to_memory_requested.connect(self.save_current_to_memory)
+        self.result.context_requested.connect(self.open_context_assistant)
         self.result.ask.connect(self.analyze)
         self.result.ask_ai.connect(self.ask_about_result)
         self.result.mode_changed.connect(self.change_mode)
@@ -221,6 +305,7 @@ class ApplicationController(QObject):
         self.tray.setToolTip(APP_NAME)
         self.menu = QMenu()
         self.home_action = self.menu.addAction("Open Home", self.open_home)
+        self.menu.addAction("Visual Memory", self.open_memory)
         self.capture_action = self.menu.addAction("Capture Screenshot", self.capture)
         self.menu.addSeparator()
         mode_menu = self.menu.addMenu("Mode")
@@ -270,6 +355,262 @@ class ApplicationController(QObject):
         self.main_window.show()
         self.main_window.raise_()
         self.main_window.activateWindow()
+
+    def open_memory(self) -> None:
+        self.main_window.open_page('memory')
+        self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+
+    def open_memory_record(self, memory_id: str) -> None:
+        try:
+            dialog = MemoryDetailDialog(self.memory_store, memory_id, self.main_window)
+        except ValueError as exc:
+            QMessageBox.warning(self.main_window, 'Visual Memory', str(exc))
+            return
+        dialog.exec()
+        if dialog.changed:
+            self.main_window.pages['memory'].refresh()
+
+    def open_context_assistant(self) -> None:
+        if (self.quitting or not self.config.contextual_assistant_enabled or not self.image_bytes or
+                not isinstance(self.last_result, (SkillResult, ModeResult))):
+            return
+        if self.context_dialog is not None:
+            self.context_dialog.show()
+            self.context_dialog.raise_()
+            return
+        self.context_session = ContextSession.new(self.capture_created_at or uuid.uuid4().hex)
+        dialog = ContextAssistantDialog(self.memory_store, self.result,
+            memory_enabled=self.config.visual_memory_enabled,
+            memory_search_enabled=self.config.context_memory_search_enabled)
+        dialog.question_requested.connect(self.submit_context_question)
+        dialog.scope_changed.connect(self.context_scope_changed)
+        dialog.permission_revoked.connect(self.revoke_context_permission)
+        dialog.clear_requested.connect(self.clear_context_session)
+        dialog.memory_open_requested.connect(self.open_memory_record)
+        dialog.source_removed.connect(self.remove_context_source)
+        dialog.current_source_requested.connect(self.result.raise_)
+        dialog.suggestion_requested.connect(self.execute_context_suggestion)
+        dialog.cancel_requested.connect(self.cancel_context_request)
+        dialog.closed.connect(self.close_context_session)
+        self.context_dialog = dialog
+        dialog.show()
+
+    def _current_context_data(self):
+        result = self.last_result
+        if isinstance(result, SkillResult):
+            return {'skill': result.skill_id, 'title': result.title,
+                    'data': result.data, 'warnings': result.warnings}
+        if isinstance(result, ModeResult):
+            return {'mode': result.mode, 'text': result.text, 'data': result.data}
+        return None
+
+    def submit_context_question(self, question: str, scope: str, memory_ids) -> None:
+        session, dialog = self.context_session, self.context_dialog
+        if self.quitting or session is None or dialog is None or not self.image_bytes:
+            return
+        try:
+            if scope == 'current_only':
+                if session.scope != scope:
+                    self.context_permissions.revoke_permission(session)
+            elif not self.config.visual_memory_enabled:
+                raise ValueError('Visual Memory access is disabled in Settings.')
+            elif scope == 'selected_memories':
+                ids = tuple(memory_ids)
+                if session.scope != scope or session.selected_memory_ids != ids:
+                    self.context_permissions.grant_selected(session, ids)
+            elif scope == 'authorized_memory_search':
+                if not self.config.context_memory_search_enabled:
+                    raise ValueError('Enable context Memory search in Settings first.')
+                if session.scope != scope:
+                    self.context_permissions.grant_search(session)
+            else:
+                raise ValueError('Unknown context scope.')
+            request = ContextRequest.new(session, question,
+                current_skill_result=self._current_context_data())
+            self.context_permissions.validate_request(session, request)
+        except ValueError as exc:
+            dialog.show_error(str(exc))
+            return
+        worker = ContextWorker(ContextController(self.memory_store, self.client,
+            self.context_permissions), session, request)
+        worker.signals.finished.connect(self.context_finished)
+        self.context_workers[request.request_id] = worker
+        self.context_latest_request = request.request_id
+        self.context_suggestions.clear()
+        dialog.show_suggestions(())
+        dialog.set_busy(question)
+        self.context_pool.start(worker)
+
+    @Slot(str, object, str)
+    def context_finished(self, request_id, result, error):
+        worker = self.context_workers.pop(request_id, None)
+        if self.quitting:
+            QTimer.singleShot(0, self.finish_quit)
+            return
+        if (worker is None or self.context_dialog is None or
+                self.context_session is not worker.session or
+                request_id != self.context_latest_request or
+                worker.request.permission_version != worker.session.permission_version):
+            return
+        if error:
+            self.context_dialog.show_error(error)
+        else:
+            self.context_dialog.show_result(result)
+            suggestions = self.context_suggestion_service.suggest(
+                self.context_session, worker.request, self.last_result,
+                result, self.workflow_registry)
+            self.context_suggestions = {item.suggestion_id: item for item in suggestions}
+            self.context_dialog.show_suggestions(suggestions)
+
+    def execute_context_suggestion(self, suggestion_id):
+        suggestion = self.context_suggestions.get(suggestion_id)
+        if (suggestion is None or self.context_dialog is None or
+                self.context_session is None or
+                suggestion.request_id != self.context_latest_request):
+            return
+        try:
+            self.context_suggestion_service.validate(suggestion,
+                self.context_session, self.last_result, self.workflow_registry)
+        except ValueError as exc:
+            self.context_dialog.show_error(str(exc))
+            self.context_suggestions.pop(suggestion_id, None)
+            return
+        if suggestion.action_id == 'workflow_preview':
+            self.run_workflow(suggestion.workflow_id, preview=True)
+            self.context_dialog.show_error('Workflow preview started. Review it in the screenshot result.')
+            return
+        outcome = execute_action(suggestion.action_id, self.last_result)
+        if not outcome.success or outcome.kind != 'copy':
+            self.context_dialog.show_error(outcome.message or 'This suggestion is unavailable.')
+            return
+        QApplication.clipboard().setText(outcome.payload)
+        self.context_dialog.show_error('Copied current result details to clipboard.')
+
+    def revoke_context_permission(self):
+        if self.context_session is not None and self.context_session.scope != 'current_only':
+            self.context_permissions.revoke_permission(self.context_session)
+            self.context_latest_request = None
+            self.context_suggestions.clear()
+
+    def context_scope_changed(self, scope):
+        if self.context_session is not None and self.context_session.scope != 'current_only':
+            self.context_permissions.revoke_permission(self.context_session)
+            self.context_latest_request = None
+            self.context_suggestions.clear()
+            if self.context_dialog is not None:
+                self.context_dialog.show_suggestions(())
+
+    def cancel_context_request(self):
+        if self.context_session is not None:
+            # Invalidate the worker result and its execution-time permission check.
+            self.context_session.permission_version += 1
+            self.context_latest_request = None
+            self.context_suggestions.clear()
+
+    def remove_context_source(self, memory_id):
+        if self.context_session is not None:
+            self.context_permissions.exclude_source(self.context_session, memory_id)
+            self.context_latest_request = None
+            self.context_suggestions.clear()
+            if self.context_dialog is not None:
+                self.context_dialog.show_suggestions(())
+
+    def clear_context_session(self):
+        if self.context_session is not None:
+            reference = self.context_session.screenshot_reference
+            self.context_permissions.revoke_permission(self.context_session)
+            self.context_session = ContextSession.new(reference)
+            self.context_latest_request = None
+            self.context_suggestions.clear()
+
+    def close_context_session(self):
+        if self.context_session is not None:
+            self.context_permissions.revoke_permission(self.context_session)
+        self.context_session = None
+        self.context_dialog = None
+        self.context_latest_request = None
+        self.context_suggestions.clear()
+
+    def save_current_to_memory(self) -> None:
+        if (not self.config.visual_memory_enabled or not self.config.show_memory_save_button or
+                not isinstance(self.last_result, (SkillResult, ModeResult)) or self.quitting):
+            return
+        if (isinstance(self.last_result, ModeResult) and
+                self.last_result.mode != 'extract' and self.last_result.data is not None):
+            return
+        preview = MemorySaveDialog(self.last_result, has_screenshot=bool(self.image_bytes),
+                                   parent=self.result)
+        if preview.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = preview.values()
+        note = values.pop('note', None)
+        source_result = self.last_result
+        if isinstance(source_result, ModeResult) and source_result.data is None:
+            if not note:
+                QMessageBox.warning(self.result, 'Visual Memory', 'Write a note before saving.')
+                return
+            source_result = ModeResult('manual_note', '', {'note': note})
+        version_id = (self.editable_extraction.skill_version_id
+                      if isinstance(self.last_result, SkillResult) and self.editable_extraction else None)
+        try:
+            try:
+                record = self.memory_store.save_result(source_result, **values,
+                    screenshot=self.image_bytes or None, skill_version_id=version_id,
+                    source_created_at=self.capture_created_at)
+            except DuplicateMemoryError as duplicate:
+                prompt = QMessageBox(self.result)
+                prompt.setWindowTitle('Already saved?')
+                prompt.setText('This exact screenshot may already be saved.')
+                open_button = prompt.addButton('Open Existing', QMessageBox.ButtonRole.AcceptRole)
+                another_button = prompt.addButton('Save Another Copy', QMessageBox.ButtonRole.ActionRole)
+                prompt.addButton('Cancel', QMessageBox.ButtonRole.RejectRole)
+                prompt.exec()
+                if prompt.clickedButton() == open_button:
+                    self.open_memory()
+                    self.open_memory_record(duplicate.existing_id)
+                    return
+                if prompt.clickedButton() != another_button:
+                    return
+                record = self.memory_store.save_result(source_result, **values,
+                    screenshot=self.image_bytes or None, skill_version_id=version_id,
+                    source_created_at=self.capture_created_at, allow_duplicate=True)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self.result, 'Unable to save Memory', str(exc))
+            return
+        self.result.set_notice('Saved to Visual Memory locally.')
+        self.main_window.pages['memory'].refresh()
+
+    def rebuild_memory_index(self):
+        try:
+            available = self.memory_store.rebuild_index()
+        except (OSError, sqlite3.Error) as exc:
+            QMessageBox.warning(self.main_window, 'Memory search', str(exc))
+            return
+        self.main_window.toast.show_message(
+            'Memory search index rebuilt.' if available else
+            'Full-text indexing is unavailable; local fallback search remains available.')
+        self.main_window.pages['memory'].refresh()
+
+    def ask_memory(self, question: str, filters):
+        if (self.quitting or not self.config.visual_memory_enabled or
+                not self.config.ai_memory_questions or self.memory_recall_worker is not None):
+            return
+        page = self.main_window.pages['memory']
+        page.set_answer_pending()
+        worker = MemoryRecallWorker(self.memory_store, self.client, question, filters)
+        worker.signals.finished.connect(self.memory_recall_finished)
+        self.memory_recall_worker = worker
+        self.memory_pool.start(worker)
+
+    @Slot(object, str)
+    def memory_recall_finished(self, answer, error):
+        self.memory_recall_worker = None
+        if self.quitting:
+            QTimer.singleShot(0, self.finish_quit)
+            return
+        self.main_window.pages['memory'].show_answer(answer, error)
 
     def open_integrations(self, integration_id=None) -> None:
         self.main_window.open_page('integrations')
@@ -398,6 +739,8 @@ class ApplicationController(QObject):
             self.result.show()
 
     def selected(self, image: QImage) -> None:
+        if getattr(self, 'context_dialog', None) is not None:
+            self.context_dialog.close()
         self.clear_overlays()
         self.result.set_notice()
         self.ask_history.clear()
@@ -407,6 +750,7 @@ class ApplicationController(QObject):
         self.failed_question = None
         self.result.followup.clear()
         self.retry_skill = None
+        self.capture_created_at = datetime.now(timezone.utc).isoformat()
         try:
             image = resize_if_needed(image, self.config.max_image_width)
             self.image_bytes = image_to_png_bytes(image)
@@ -443,6 +787,8 @@ class ApplicationController(QObject):
         self.start_analysis(mode, question)
 
     def start_analysis(self, mode: str, question: str = '') -> None:
+        if self.context_dialog is not None:
+            self.context_dialog.close()
         self.request_id += 1
         worker = AnalysisWorker(self.request_id, self.client, self.image_bytes, mode, question,
                                 self.ask_history if mode == 'ask' and question.strip() else None)
@@ -454,6 +800,8 @@ class ApplicationController(QObject):
         self.pool.start(worker)
 
     def run_smart_pipeline(self) -> None:
+        if self.context_dialog is not None:
+            self.context_dialog.close()
         self.request_id += 1
         self.last_result = None
         self.editable_extraction = None
@@ -499,6 +847,8 @@ class ApplicationController(QObject):
             self.start_analysis(route)
 
     def start_skill(self, skill, confidence):
+        if self.context_dialog is not None:
+            self.context_dialog.close()
         self.request_id += 1
         self.retry_skill = (skill, confidence)
         worker = SkillExtractionWorker(self.request_id, self.client, self.image_bytes, skill, confidence)
@@ -720,9 +1070,12 @@ class ApplicationController(QObject):
         self.analyze(question or 'Explain the extracted information in this screenshot.')
 
     def discard_result(self) -> None:
+        if self.context_dialog is not None:
+            self.context_dialog.close()
         self.retry_skill = None
         self.result.set_notice()
         self.image_bytes = b""
+        self.capture_created_at = None
         self.ask_history.clear()
         self.last_result = None
         self.editable_extraction = None
@@ -1218,6 +1571,16 @@ class ApplicationController(QObject):
         if config.ai_model is not None:
             os.environ['AI_MODEL'] = config.ai_model
         self.main_window.pages['settings'].refresh(config)
+        self.main_window.pages['memory'].set_ai_enabled(
+            config.visual_memory_enabled and config.ai_memory_questions)
+        self.result.memory_save_enabled = (
+            config.visual_memory_enabled and config.show_memory_save_button)
+        self.result.context_enabled = config.contextual_assistant_enabled
+        if self.context_dialog and (not config.contextual_assistant_enabled or
+                not config.visual_memory_enabled or
+                (self.context_session and self.context_session.scope == 'authorized_memory_search'
+                 and not config.context_memory_search_enabled)):
+            self.context_dialog.close()
         self.main_window.pages['evaluation'].max_evaluation_cases = config.max_evaluation_cases
         self.theme_manager.set_preference(config.theme)
         self.main_window.hotkey_label.setText(' + '.join(part.capitalize() for part in config.hotkey.split('+')))
@@ -1259,7 +1622,7 @@ class ApplicationController(QObject):
             self.skill_manager.close()
         if self.workflow_manager:
             self.workflow_manager.close()
-        if self.workers:
+        if self.workers or self.context_workers:
             self.result.set_response("Finishing the current request before quitting...", error=True)
             self.result.show()
             self.capture_action.setEnabled(False)
@@ -1267,7 +1630,9 @@ class ApplicationController(QObject):
             self.finish_quit()
 
     def finish_quit(self) -> None:
-        if QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or self.integration_jobs:
+        if (QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or
+                self.integration_jobs or self.memory_recall_worker is not None or
+                self.context_workers):
             self.result.set_response('Finishing the current skill request before quitting...', error=True)
             self.result.show()
             QTimer.singleShot(50, self.finish_quit)
@@ -1275,5 +1640,7 @@ class ApplicationController(QObject):
         self.pool.waitForDone()
         self.workflow_pool.waitForDone()
         self.integration_pool.waitForDone()
+        self.memory_pool.waitForDone()
+        self.context_pool.waitForDone()
         self.tray.hide()
         self.app.quit()

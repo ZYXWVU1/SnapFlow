@@ -85,6 +85,38 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
         self.remove_key_button.clicked.connect(lambda _checked=False: self.remove_key_requested.emit())
         self.ai_card.content.addWidget(self.remove_key_button)
         body.addWidget(self.ai_card)
+        memory = Card()
+        memory.content.addWidget(QLabel('Visual Memory'))
+        self.visual_memory_enabled = QCheckBox('Enable Visual Memory')
+        self.visual_memory_enabled.setChecked(config.visual_memory_enabled)
+        self.show_memory_save_button = QCheckBox('Show Save to Memory on results')
+        self.show_memory_save_button.setChecked(config.show_memory_save_button)
+        self.ai_memory_questions = QCheckBox('Enable AI Memory Questions')
+        self.ai_memory_questions.setChecked(config.ai_memory_questions)
+        memory.content.addWidget(self.visual_memory_enabled)
+        memory.content.addWidget(self.show_memory_save_button)
+        memory.content.addWidget(self.ai_memory_questions)
+        disclosure = QLabel('AI Memory Questions send up to five retrieved saved text records to your configured provider. Original screenshots are not sent. Local search needs no AI connection.')
+        disclosure.setWordWrap(True)
+        disclosure.setProperty('role', 'muted')
+        memory.content.addWidget(disclosure)
+        body.addWidget(memory)
+        context = Card()
+        context.content.addWidget(QLabel('Contextual Intelligence'))
+        self.contextual_assistant_enabled = QCheckBox('Enable Ask with Context on screenshot results')
+        self.contextual_assistant_enabled.setChecked(config.contextual_assistant_enabled)
+        self.context_memory_search_enabled = QCheckBox('Allow whole-library Memory search in a context session')
+        self.context_memory_search_enabled.setChecked(config.context_memory_search_enabled)
+        context.content.addWidget(self.contextual_assistant_enabled)
+        context.content.addWidget(self.context_memory_search_enabled)
+        context_note = QLabel(
+            'New sessions start with the current screenshot only. You must select memories or '
+            'enable search in each session before saved text is sent to the configured AI provider. '
+            'Original saved screenshots are excluded.')
+        context_note.setWordWrap(True)
+        context_note.setProperty('role', 'muted')
+        context.content.addWidget(context_note)
+        body.addWidget(context)
         usage = Card()
         usage.content.addWidget(QLabel('Usage & Costs'))
         usage_form = QFormLayout()
@@ -144,7 +176,13 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
                 max_evaluation_cases=self.max_evaluation_cases.value(),
                 automatic_update_checks=self.automatic_updates.isChecked(),
                 ai_base_url=self.ai_base_url.text().strip(),
-                ai_model=self.ai_model.text().strip())
+                ai_model=self.ai_model.text().strip(),
+                visual_memory_enabled=self.visual_memory_enabled.isChecked(),
+                show_memory_save_button=self.show_memory_save_button.isChecked(),
+                semantic_search_enabled=self.config.semantic_search_enabled,
+                ai_memory_questions=self.ai_memory_questions.isChecked(),
+                contextual_assistant_enabled=self.contextual_assistant_enabled.isChecked(),
+                context_memory_search_enabled=self.context_memory_search_enabled.isChecked())
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid settings", str(exc))
             return

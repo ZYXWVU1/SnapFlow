@@ -43,6 +43,12 @@ class Config:
     automatic_update_checks: bool = False
     ai_base_url: str | None = None
     ai_model: str | None = None
+    visual_memory_enabled: bool = True
+    show_memory_save_button: bool = True
+    semantic_search_enabled: bool = False
+    ai_memory_questions: bool = False
+    contextual_assistant_enabled: bool = True
+    context_memory_search_enabled: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.default_mode, str):
@@ -70,6 +76,11 @@ class Config:
             raise ValueError('Maximum Evaluation cases must be between 1 and 10,000.')
         if type(self.automatic_update_checks) is not bool:
             raise ValueError('Automatic update checks must be true or false.')
+        for name in ('visual_memory_enabled', 'show_memory_save_button',
+                     'semantic_search_enabled', 'ai_memory_questions',
+                     'contextual_assistant_enabled', 'context_memory_search_enabled'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'{name} must be true or false.')
         if self.ai_base_url is not None:
             if not isinstance(self.ai_base_url, str):
                 raise ValueError('AI endpoint must be text.')

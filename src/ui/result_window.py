@@ -26,6 +26,8 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
     integration_requested = Signal()
     edit_requested = Signal()
     save_example_requested = Signal()
+    save_to_memory_requested = Signal()
+    context_requested = Signal()
 
     def __init__(self, mode: str, always_on_top: bool) -> None:
         super().__init__()
@@ -88,6 +90,8 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         body.addWidget(self.action_card)
         self.action_card.hide()
         self.workflow_registry = None
+        self.memory_save_enabled = True
+        self.context_enabled = True
         self.workflow_buttons = []
         self.workflow_area = Card()
         self.workflow_layout = self.workflow_area.content
@@ -169,6 +173,11 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.copy.hide()
         render_skill(self.structured, result)
         self.structured.show()
+        self._add_context_action()
+        if self.memory_save_enabled:
+            save_memory = AppButton('Save to Memory', variant='secondary')
+            save_memory.clicked.connect(self.save_to_memory_requested)
+            self.add_action('Save to Memory', save_memory)
         if editable:
             edit = AppButton('Edit Result', variant='secondary')
             edit.clicked.connect(self.edit_requested)
@@ -215,12 +224,21 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.set_response(conversation if conversation is not None else result.text)
         self.again.setText('Ask Again' if result.mode in ('explain', 'translate') else 'Retry')
         self.followup_row.setVisible(result.mode == 'ask')
+        self._add_context_action()
         if result.data is None:
+            if self.memory_save_enabled:
+                save_note = AppButton('Save Note to Memory', variant='secondary')
+                save_note.clicked.connect(self.save_to_memory_requested)
+                self.add_action('Save Note to Memory', save_note)
             return
         self.text.hide()
         self.copy.hide()
         self.structured.render(result)
         self.structured.show()
+        if result.mode == 'extract' and self.memory_save_enabled:
+            save_memory = AppButton('Save to Memory', variant='secondary')
+            save_memory.clicked.connect(self.save_to_memory_requested)
+            self.add_action('Save to Memory', save_memory)
         for label, value in copy_formats(result).items():
             button = AppButton(label)
             button.clicked.connect(lambda checked=False, text=value: QApplication.clipboard().setText(text))
@@ -238,6 +256,13 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         index = len(self.action_buttons)
         self.action_buttons[label] = button
         self.actions_layout.addWidget(button, index // 3, index % 3)
+
+    def _add_context_action(self):
+        if not self.context_enabled:
+            return
+        button = AppButton('Ask with Context', variant='secondary')
+        button.clicked.connect(self.context_requested)
+        self.add_action('Ask with Context', button)
 
     def set_notice(self, text: str = '') -> None:
         self.notice.setText(text)

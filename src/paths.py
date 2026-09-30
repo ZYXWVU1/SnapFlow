@@ -115,6 +115,10 @@ class AppPaths:
         return self.data_dir / "verified_images"
 
     @property
+    def memory_images_dir(self):
+        return self.data_dir / "memory" / "images"
+
+    @property
     def migration_marker(self):
         return self.data_dir / "migration.json"
 

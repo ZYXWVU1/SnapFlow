@@ -26,10 +26,30 @@ release/
 /.github/workflows/windows-build.yml
 /packaging/
 /scripts/
+!/scripts/
+/scripts/*
+!/scripts/benchmark_phase9.py
 
 # Requested local-only folders and screenshots.
 /docs/
 /tests/
+!/docs/
+/docs/*
+!/docs/PHASE9_IMPLEMENTATION.md
+!/docs/PHASE10_IMPLEMENTATION.md
+!/docs/USER_GUIDE.md
+!/docs/PRIVACY.md
+!/tests/
+/tests/*
+!/tests/test_phase9_memory.py
+!/tests/test_phase9_memory_ui.py
+!/tests/test_phase9_recall.py
+!/tests/test_phase10_context.py
+!/tests/test_phase10_ui.py
+!/tests/test_phase10_suggestions.py
+!/tests/test_phase10_evaluation.py
+!/tests/test_phase8b_database.py
+!/tests/test_phase8h_usage.py
 /assets/screenshots/
 
 # Local user data and temporary files.

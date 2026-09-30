@@ -12,6 +12,8 @@ Capture and provider requests start with a user action. Workflow actions that wr
 - **Build Visual Workflows:** Combine a skill match, conditions, and ordered actions. Suggest mode lets you review a proposed run. Auto mode still asks you to confirm before actions run.
 - **Connect services:** Workflows can create Google Calendar events, append Google Sheets rows, or create Todoist tasks. Local actions include copying results and saving calendar files.
 - **Manage examples and data:** Save verified examples when you choose, review skill versions, evaluate changes, back up and restore local data, and export a sanitized support bundle when you request one.
+- **Build Visual Memory:** Choose **Save to Memory** on a structured Skill or Extract result, then search saved information locally from the Memory page. AI Memory Questions are an optional setting and send only retrieved saved text to your provider.
+- **Ask with Context:** After reviewing a screenshot result, ask a follow-up using the current analysis, memories you select, or a separately enabled session-scoped Memory search. Source buttons open the saved records used in the answer.
 - **Check usage and updates:** View token usage and estimated costs when model rates are known. Optional update checks show release information; they do not download or install updates.
 
 ## Get started
@@ -59,7 +61,9 @@ Each request sends the selected image to the configured provider and may incur a
 
 ## Privacy and local data
 
-- Captures are held in memory and are not kept as screenshot history. A screenshot is saved only if you choose to save it with a verified example.
+- Captures are held in memory and are not kept as screenshot history. A screenshot is saved only if you choose to include it with a verified example or Visual Memory record.
+- Visual Memory records live in `%APPDATA%\SnapFlow\learning.sqlite3`; optional images live under `%APPDATA%\SnapFlow\memory\images`. Local keyword search needs no provider connection. AI Memory Questions are off by default.
+- Contextual Assistant sessions start with the current screenshot analysis only. Selecting a Memory or enabling session search sends bounded saved text, not saved images, to the configured provider when you press Ask. Context sessions are temporary and are cleared when the screenshot result closes.
 - Asking a follow-up or retrying may send the retained screenshot to the provider again.
 - SnapFlow does not run local OCR. The configured AI provider processes images sent with your requests.
 - Saved keys are kept in Windows Credential Manager, not in `config.json` or backup archives. Provider and model settings are non-secret values.
@@ -91,3 +95,4 @@ python main.py --smoke-test
 - AI output can be incomplete or incorrect. Review extracted values and suggested actions before relying on them.
 - Requests do not stream or retry automatically. Closing a result prevents it from appearing later but cannot retract a request already sent to a provider.
 - SnapFlow does not start automatically with Windows or install updates automatically.
+- Visual Memory currently has local keyword search and optional text-only AI questions. Semantic embeddings, Memory-to-Workflow reuse, retention controls, and packaged Phase 9 validation are still in progress; see `docs/PHASE9_IMPLEMENTATION.md`.

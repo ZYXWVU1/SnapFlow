@@ -6,7 +6,7 @@ import sqlite3
 import uuid
 
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 class DatabaseMigrationError(RuntimeError):
@@ -108,6 +108,46 @@ def _migrate_api_usage_details(connection):
 
 
 _MIGRATIONS[2] = _migrate_api_usage_details
+
+
+def _migrate_visual_memory(connection):
+    """Create opt-in records without joining Phase 7 example data."""
+    connection.execute("""CREATE TABLE memory_records (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        skill_id TEXT,
+        skill_version_id TEXT,
+        structured_data_json TEXT NOT NULL,
+        searchable_text TEXT NOT NULL,
+        screenshot_path TEXT,
+        thumbnail_path TEXT,
+        source_created_at TEXT,
+        saved_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        content_hash TEXT,
+        schema_version INTEGER NOT NULL
+    )""")
+    connection.execute("CREATE INDEX idx_memory_saved_at ON memory_records(saved_at)")
+    connection.execute("CREATE INDEX idx_memory_content_hash ON memory_records(content_hash)")
+    connection.execute("""CREATE TABLE memory_tags (
+        memory_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+        tag TEXT NOT NULL,
+        PRIMARY KEY(memory_id, tag)
+    )""")
+    connection.execute("CREATE INDEX idx_memory_tag ON memory_tags(tag)")
+    connection.execute("""CREATE TABLE memory_revisions (
+        id TEXT PRIMARY KEY,
+        memory_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+        prior_record_json TEXT NOT NULL,
+        changed_at TEXT NOT NULL
+    )""")
+    connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?)",
+        (4, datetime.now(timezone.utc).isoformat(), "Add explicit Visual Memory records and revisions."))
+
+
+_MIGRATIONS[3] = _migrate_visual_memory
 
 
 def initialize_learning_database(path, backup_dir=None):

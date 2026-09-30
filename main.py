@@ -1,5 +1,6 @@
 """Windows desktop entry point."""
 import logging
+import os
 import sys
 
 from src.bootstrap import DependencyError, ensure_dependencies, show_dependency_error
@@ -7,10 +8,12 @@ from src.app_version import APP_NAME, APP_VERSION
 
 
 def main() -> int:
+    phase10_smoke = ("--phase10-smoke-test" in sys.argv and
+                     os.environ.get("SNAPFLOW_PHASE10_SMOKE") == "1")
     try:
         ensure_dependencies()
     except DependencyError as error:
-        if "--smoke-test" in sys.argv:
+        if "--smoke-test" in sys.argv or phase10_smoke:
             print(f"Startup smoke failed: {error}", file=sys.stderr)
             return 1
         show_dependency_error(error)
@@ -44,7 +47,7 @@ def main() -> int:
         report = classify_error(error)
         logging.getLogger(__name__).exception(
             "Application startup failed [%s] category=%s", report.reference_id, report.category)
-        if "--smoke-test" in sys.argv:
+        if "--smoke-test" in sys.argv or phase10_smoke:
             print(f"Startup smoke failed [{report.reference_id}]: {report.user_message}", file=sys.stderr)
             return 1
         QMessageBox.critical(
@@ -60,8 +63,11 @@ def main() -> int:
         app,
         preview="--preview" in sys.argv,
         paths=paths,
-        suppress_onboarding="--smoke-test" in sys.argv)
-    if "--smoke-test" in sys.argv:
+        suppress_onboarding="--smoke-test" in sys.argv or phase10_smoke)
+    if phase10_smoke:
+        from src.context.packaged_smoke import run_packaged_context_smoke
+        QTimer.singleShot(0, lambda: run_packaged_context_smoke(app))
+    elif "--smoke-test" in sys.argv:
         QTimer.singleShot(500, controller.quit)
     return app.exec()
 

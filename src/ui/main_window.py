@@ -10,13 +10,15 @@ from src.ui.design.tokens import SPACING
 from src.ui.pages.skills import SkillsPage
 from src.ui.pages.workflows import WorkflowsPage
 from src.ui.pages.history import HistoryPage
+from src.ui.pages.memory import MemoryPage
 from src.ui.pages.settings import SettingsPage
 from src.ui.integrations.integration_page import IntegrationPage
 from src.ui.evaluation.page import EvaluationPage
 
 
-PAGES = ('home', 'skills', 'workflows', 'integrations', 'evaluation', 'history', 'settings')
+PAGES = ('home', 'memory', 'skills', 'workflows', 'integrations', 'evaluation', 'history', 'settings')
 _PAGE_COPY = {
+    'memory': ('Visual Memory', 'Search information you explicitly saved.', None),
     'skills': ('Visual Skills', 'Teach AI to recognize the screenshots that matter to you.', 'Open Visual Skills'),
     'workflows': ('Workflows', 'Choose what happens after a Visual Skill matches.', 'Open Visual Workflows'),
     'integrations': ('Integrations', 'Connect your tools and send structured data where it belongs.', None),
@@ -45,9 +47,13 @@ class MainWindow(QMainWindow):
     usage_summary_requested = Signal()
     update_check_requested = Signal()
     onboarding_requested = Signal()
+    memory_open_requested = Signal(str)
+    memory_ask_requested = Signal(str, object)
+    memory_rebuild_requested = Signal()
 
     def __init__(self, hotkey, parent=None, *, skills_storage=None, workflows_storage=None,
-                 history=None, config=None, integration_registry=None, connection_storage=None, paths=None):
+                 history=None, config=None, integration_registry=None, connection_storage=None, paths=None,
+                 memory_store=None):
         super().__init__(parent)
         self.setObjectName('AppShell')
         self.setWindowTitle(APP_NAME)
@@ -100,6 +106,11 @@ class MainWindow(QMainWindow):
         for page in PAGES:
             if page == 'home':
                 widget = self._build_home(hotkey)
+            elif page == 'memory' and memory_store is not None:
+                widget = MemoryPage(memory_store)
+                widget.memory_open_requested.connect(self.memory_open_requested)
+                widget.ask_requested.connect(self.memory_ask_requested)
+                widget.capture_requested.connect(self.capture_requested)
             elif page == 'skills':
                 widget = SkillsPage(skills_storage)
                 widget.manage_requested.connect(lambda: self.feature_requested.emit('skills'))
@@ -134,6 +145,7 @@ class MainWindow(QMainWindow):
                 widget.usage_summary_requested.connect(self.usage_summary_requested)
                 widget.update_check_requested.connect(self.update_check_requested)
                 widget.onboarding_requested.connect(self.onboarding_requested)
+                widget.memory_rebuild_requested.connect(self.memory_rebuild_requested)
                 self.launch_buttons[page] = widget.edit_button
             else:
                 widget = self._build_feature_page(page)
@@ -233,7 +245,7 @@ class MainWindow(QMainWindow):
             self._refresh_home()
         elif page == 'settings':
             widget.refresh(self.config)
-        elif page in ('skills', 'workflows', 'evaluation', 'history', 'integrations') and hasattr(widget, 'refresh'):
+        elif page in ('memory', 'skills', 'workflows', 'evaluation', 'history', 'integrations') and hasattr(widget, 'refresh'):
             widget.refresh()
         self.stack.setCurrentWidget(self.pages[page])
         for key, button in self.nav_buttons.items():

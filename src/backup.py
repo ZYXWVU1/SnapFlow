@@ -41,6 +41,7 @@ _CATEGORY_TARGETS = {
     "integrations": ("integrations_file",),
     "evaluation": ("learning_database",),
     "examples": ("verified_images_dir",),
+    "memory": ("memory_images_dir",),
 }
 
 
@@ -120,6 +121,15 @@ class BackupService:
                 if _safe_member_category(member) != "examples":
                     raise BackupError("An example filename cannot be represented safely in a backup.")
                 items.append(("examples", member, image))
+        memory_dir = self.paths.memory_images_dir
+        if memory_dir.exists():
+            if memory_dir.is_symlink() or not memory_dir.is_dir():
+                raise BackupError('The Visual Memory images path is not a regular directory.')
+            for image in sorted(memory_dir.iterdir()):
+                if image.is_symlink():
+                    raise BackupError('Refusing to back up a symbolic link in Visual Memory.')
+                if image.is_file() and re.fullmatch(r'[0-9a-f]{32}(?:-thumb)?\.png', image.name):
+                    items.append(('memory', f'memory/images/{image.name}', image))
         return items
 
     def _check_destination(self, destination):
@@ -390,6 +400,8 @@ class BackupService:
             return self.paths.learning_database
         if _safe_member_category(member) == "examples":
             return self.paths.verified_images_dir.joinpath(*PurePosixPath(member).parts[2:])
+        if _safe_member_category(member) == 'memory':
+            return self.paths.memory_images_dir / PurePosixPath(member).name
         raise BackupError("Backup references an unsupported data file.")
 
     def _category_targets(self, category):
@@ -444,6 +456,11 @@ class BackupService:
                         if member.startswith("examples/verified_images/"):
                             target = self.paths.verified_images_dir
                             staged = staged_root / "examples" / "verified_images"
+                            if target in installed:
+                                continue
+                        if member.startswith('memory/images/'):
+                            target = self.paths.memory_images_dir
+                            staged = staged_root / 'memory' / 'images'
                             if target in installed:
                                 continue
                         target.parent.mkdir(parents=True, exist_ok=True)
@@ -515,4 +532,7 @@ def _safe_member_category(member):
                                                          "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
                                                          "LPT7", "LPT8", "LPT9"}):
         return "examples"
+    if (len(pure.parts) == 3 and pure.parts[:2] == ('memory', 'images') and
+            re.fullmatch(r'[0-9a-f]{32}(?:-thumb)?\.png', pure.parts[2])):
+        return 'memory'
     return None

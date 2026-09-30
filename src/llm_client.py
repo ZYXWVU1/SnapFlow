@@ -86,7 +86,8 @@ class LLMClient:
             logging.getLogger(__name__).warning('Unable to record provider token usage.')
 
     def request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
-                     base_url=None, model=None, usage_operation=None) -> str:
+                     base_url=None, model=None, usage_operation=None,
+                     system_prompt=None) -> str:
         """Use the configured provider for an explicit text-only Skill proposal."""
         key = (os.getenv('AI_API_KEY', '') if api_key is None else api_key).strip()
         if not key:
@@ -97,11 +98,15 @@ class LLMClient:
             raise AnalysisError('The configured AI model identifier is invalid.')
         model = model.strip()
         started = time.perf_counter()
+        messages = []
+        if system_prompt:
+            messages.append({'role': 'system', 'content': system_prompt})
+        messages.append({'role': 'user', 'content': prompt})
         try:
             with OpenAI(api_key=key, base_url=base_url,
                         timeout=_request_timeout(base_url), max_retries=0) as client:
                 response = client.chat.completions.create(model=model,
-                    messages=[{'role': 'user', 'content': prompt}],
+                    messages=messages,
                     max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192))
             self._record_usage(response, model=model, base_url=base_url,
                                operation=usage_operation or 'text', started=started)
