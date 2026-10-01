@@ -1,4 +1,5 @@
 from PySide6.QtCore import Qt, Signal
+from datetime import date
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QComboBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
 
@@ -28,6 +29,7 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
     save_example_requested = Signal()
     save_to_memory_requested = Signal()
     context_requested = Signal()
+    calendar_event_requested = Signal(object)
 
     def __init__(self, mode: str, always_on_top: bool) -> None:
         super().__init__()
@@ -82,6 +84,10 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.action_card.content.addWidget(QLabel('Actions'))
         self.actions_layout = QGridLayout()
         self.action_buttons = {}
+        self.google_calendar_connected = False
+        self.calendar_action_button = None
+        self.calendar_event_result = None
+        self.calendar_action_busy = False
         self.action_card.content.addLayout(self.actions_layout)
         self.action_status = QLabel()
         self.action_status.setTextFormat(Qt.TextFormat.PlainText)
@@ -145,6 +151,9 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
             widget.hide()
             widget.deleteLater()
         self.action_buttons.clear()
+        self.calendar_action_button = None
+        self.calendar_event_result = None
+        self.calendar_action_busy = False
 
     def set_workflow_registry(self, registry):
         self.workflow_registry = registry
@@ -186,6 +195,8 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
             save_example = AppButton('Save Verified Example', variant='secondary')
             save_example.clicked.connect(self.save_example_requested)
             self.add_action('Save Verified Example', save_example)
+        if result.skill_id == 'event':
+            self._add_calendar_action(result)
         for action_id in result.actions:
             action = ACTIONS.get(action_id)
             if action is None:
@@ -207,6 +218,55 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
                 self.workflow_buttons.append(button)
             if self.workflow_buttons:
                 self.workflow_area.show()
+
+    def _add_calendar_action(self, result):
+        self.calendar_event_result = result
+        button = AppButton('Add to Google Calendar', variant='primary')
+        button.clicked.connect(lambda checked=False, item=result: self._request_calendar_event(item))
+        self.calendar_action_button = button
+        self.add_action(button.text(), button)
+        self._refresh_calendar_action()
+
+    def _calendar_event_ready(self, result):
+        title = result.data.get('title')
+        event_date = result.data.get('date')
+        if not isinstance(title, str) or not title.strip():
+            return False
+        try:
+            date.fromisoformat(event_date)
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    def _refresh_calendar_action(self):
+        button, result = self.calendar_action_button, self.calendar_event_result
+        if button is None or result is None:
+            return
+        ready = self._calendar_event_ready(result)
+        if self.calendar_action_busy:
+            button.setText('Adding…')
+        else:
+            button.setText('Add to Google Calendar' if self.google_calendar_connected
+                           else 'Connect Google Calendar')
+        button.setEnabled(ready and not self.calendar_action_busy)
+        button.setToolTip('' if ready else 'A detected event title and valid date are required.')
+
+    def _request_calendar_event(self, result):
+        if self.google_calendar_connected:
+            self.calendar_event_requested.emit(result)
+        else:
+            self.integration_requested.emit()
+
+    def set_google_calendar_connected(self, connected):
+        self.google_calendar_connected = bool(connected)
+        self._refresh_calendar_action()
+
+    def set_calendar_action_busy(self, busy):
+        self.calendar_action_busy = bool(busy)
+        self._refresh_calendar_action()
+
+    def set_calendar_action_status(self, text):
+        self.action_status.setText(text)
 
     def set_skill_error(self, message):
         self.set_response(message, True)

@@ -10,7 +10,7 @@ Capture and provider requests start with a user action. Workflow actions that wr
 - **Extract structured information:** Smart mode recognizes supported content such as events, assignments, code errors, and tables. Review the fields before copying or exporting them.
 - **Create Visual Skills:** Use built-in skills or define custom screenshot types, fields, and reusable actions without writing code. Test and edit a skill before enabling it.
 - **Build Visual Workflows:** Combine a skill match, conditions, and ordered actions. Suggest mode lets you review a proposed run. Auto mode still asks you to confirm before actions run.
-- **Connect services:** Workflows can create Google Calendar events, append Google Sheets rows, or create Todoist tasks. Local actions include copying results and saving calendar files.
+- **Connect services:** From a detected Event result, add the event to Google Calendar with one click or save it as an `.ics` file. Workflows can also create Google Calendar events, append Google Sheets rows, or create Todoist tasks.
 - **Manage examples and data:** Save verified examples when you choose, review skill versions, evaluate changes, back up and restore local data, and export a sanitized support bundle when you request one.
 - **Build Visual Memory:** Choose **Save to Memory** on a structured Skill or Extract result, then search saved information locally from the Memory page. AI Memory Questions are an optional setting and send only retrieved saved text to your provider.
 - **Ask with Context:** After reviewing a screenshot result, ask a follow-up using the current analysis, memories you select, or a separately enabled session-scoped Memory search. Source buttons open the saved records used in the answer.
@@ -59,6 +59,10 @@ The default endpoint is OpenAI, with `gpt-4.1-mini` as the default model. Other 
 
 Each request sends the selected image to the configured provider and may incur a charge. Testing a connection sends a short text request and may also incur a charge.
 
+## Google sign-in configuration
+
+Google sign-in uses the app's Desktop OAuth client ID. If Google's token endpoint requires the matching client secret, source runs read `SNAPFLOW_GOOGLE_CLIENT_SECRET` from `.env`; Windows bundles include credentials supplied through the build process environment. An existing installation may continue using its saved legacy Google client ID.
+
 ## Privacy and local data
 
 - Captures are held in memory and are not kept as screenshot history. A screenshot is saved only if you choose to include it with a verified example or Visual Memory record.
@@ -68,7 +72,7 @@ Each request sends the selected image to the configured provider and may incur a
 - SnapFlow does not run local OCR. The configured AI provider processes images sent with your requests.
 - Saved keys are kept in Windows Credential Manager, not in `config.json` or backup archives. Provider and model settings are non-secret values.
 - Settings and user data are stored under `%APPDATA%\SnapFlow`. The source-only `.env` file stays in the project folder.
-- Workflow writes to Google Calendar, Google Sheets, or Todoist happen only after you confirm the action. Imported workflows start disabled in Suggest mode.
+- Direct Google Calendar event creation happens only after you click **Add to Google Calendar**. Workflow writes to Google Calendar, Google Sheets, or Todoist happen only after you confirm the action. Imported workflows start disabled in Suggest mode.
 
 ## Keyboard shortcuts
 

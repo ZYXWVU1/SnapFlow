@@ -61,9 +61,13 @@ from src.ui.workflows.runner import WorkflowBridge, WorkflowWorker
 from src.integrations.registry import IntegrationRegistry
 from src.integrations.storage import ConnectionStorage
 from src.integrations.credentials import CredentialError, CredentialService
+from src.integrations.google.config import (
+    resolve_google_client_id,
+    resolve_google_client_secret,
+)
 from src.integrations.service import IntegrationService
 from src.ui.integrations.connection_dialog import GoogleConnectDialog, TodoistConnectDialog
-from src.ui.integrations.worker import ConnectionWorker
+from src.ui.integrations.worker import CalendarEventWorker, ConnectionWorker
 
 
 class WorkerSignals(QObject):
@@ -214,10 +218,13 @@ class ApplicationController(QObject):
         self.integration_registry = IntegrationRegistry()
         self.connection_storage = ConnectionStorage(path=self.paths.integrations_file)
         self.integration_service = IntegrationService(self.integration_registry,
-            self.connection_storage, self.credential_service)
+            self.connection_storage, self.credential_service,
+            google_client_id=resolve_google_client_id(self.paths.resource_root),
+            google_client_secret=resolve_google_client_secret(self.paths.resource_root))
         self.integration_pool = QThreadPool(self)
         self.integration_pool.setMaxThreadCount(2)
         self.integration_jobs = {}
+        self.calendar_event_worker = None
         self.integration_dialogs = []
         self.workflow_pool = QThreadPool(self)
         self.workflow_pool.setMaxThreadCount(1)
@@ -287,6 +294,7 @@ class ApplicationController(QObject):
         self.result.workflow_requested.connect(self.run_workflow)
         self.result.workflow_cancel_requested.connect(self.cancel_workflow)
         self.result.integration_requested.connect(self.open_integrations)
+        self.result.calendar_event_requested.connect(self.create_calendar_event)
         self.result.edit_requested.connect(self.edit_result)
         self.result.save_example_requested.connect(self.save_verified_example)
         self.result.save_to_memory_requested.connect(self.save_current_to_memory)
@@ -296,6 +304,7 @@ class ApplicationController(QObject):
         self.result.mode_changed.connect(self.change_mode)
         self.result.closed.connect(self.discard_result)
         self.result.settings_requested.connect(self.open_settings)
+        self._refresh_google_calendar_action()
         icon = QIcon(str(self.paths.resource_path("assets/icon.ico")))
         if icon.isNull():
             icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
@@ -634,10 +643,10 @@ class ApplicationController(QObject):
             return None
         if integration_id == 'google':
             connection = self.connection_storage.get('google')
-            dialog = GoogleConnectDialog(self.credential_service.get('google_client_id') or '', self.main_window,
+            dialog = GoogleConnectDialog(self.main_window,
                 capabilities=connection.granted_capabilities if connection else ())
-            dialog.submitted.connect(lambda client_id, capabilities:
-                self._start_integration_worker('google', 'connect_google', client_id, capabilities))
+            dialog.submitted.connect(lambda capabilities:
+                self._start_integration_worker('google', 'connect_google', capabilities))
         elif integration_id == 'todoist':
             dialog = TodoistConnectDialog(self.main_window)
             dialog.submitted.connect(lambda token:
@@ -679,8 +688,40 @@ class ApplicationController(QObject):
         self.main_window.pages['integrations'].refresh()
         self.main_window.pages['integrations'].set_busy(integration_id, False)
         self.integration_jobs.pop(integration_id, None)
+        self._refresh_google_calendar_action()
         if not self.quitting:
             self.main_window.toast.show_message(outcome.message)
+
+    def _google_calendar_connected(self):
+        connection = self.connection_storage.get('google')
+        return bool(connection and connection.status == 'connected' and
+                    'google_calendar' in connection.granted_capabilities)
+
+    def _refresh_google_calendar_action(self):
+        self.result.set_google_calendar_connected(self._google_calendar_connected())
+        self.result.set_calendar_action_busy(self.calendar_event_worker is not None)
+
+    def create_calendar_event(self, result):
+        if self.quitting or self.calendar_event_worker is not None or self.last_result is not result:
+            return
+        if not self._google_calendar_connected():
+            self._refresh_google_calendar_action()
+            self.open_integrations()
+            return
+        worker = CalendarEventWorker(self.integration_service, result)
+        self.calendar_event_worker = worker
+        self._refresh_google_calendar_action()
+        worker.signals.finished.connect(
+            lambda outcome, source=result: self.calendar_event_finished(source, outcome))
+        self.integration_pool.start(worker)
+
+    def calendar_event_finished(self, source_result, outcome):
+        self.calendar_event_worker = None
+        self._refresh_google_calendar_action()
+        if (not self.quitting and self.last_result is source_result and
+                self.result.calendar_event_result is source_result):
+            self.result.set_calendar_action_status(outcome.message)
+        self.main_window.pages['integrations'].refresh()
 
     def capture(self) -> None:
         if self.capturing or self.workers or self.quitting:
@@ -901,6 +942,7 @@ class ApplicationController(QObject):
                     self.prepare_editable_result(text)
                     self.saved_example_id = None
                     self.result.set_skill_result(text, editable=self.editable_extraction is not None)
+                    self._refresh_google_calendar_action()
                     self._auto_seen.clear()
                     self._workflow_results.clear()
                     self.dispatch_auto_workflows(text)
@@ -954,6 +996,7 @@ class ApplicationController(QObject):
         prior_status = self.result.workflow_status.text()
         self.result.set_skill_result(self.last_result, editable=True,
             can_verify=bool(self.editable_extraction.changed_fields) and self.saved_example_id is None)
+        self._refresh_google_calendar_action()
         if prior_status:
             self.result.set_workflow_status(prior_status, running=bool(self.workflow_jobs))
         if self.editable_extraction.changed_fields and self.saved_example_id is None:
@@ -984,6 +1027,7 @@ class ApplicationController(QObject):
             return
         self.saved_example_id = record.id
         self.result.set_skill_result(self.last_result, editable=True)
+        self._refresh_google_calendar_action()
         self.result.set_notice('Verified example saved locally.')
 
     def run_workflow(self, workflow_id: str, *, automatic=False, preview=False) -> None:
@@ -1631,7 +1675,8 @@ class ApplicationController(QObject):
 
     def finish_quit(self) -> None:
         if (QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or
-                self.integration_jobs or self.memory_recall_worker is not None or
+                self.integration_jobs or self.calendar_event_worker is not None or
+                self.memory_recall_worker is not None or
                 self.context_workers):
             self.result.set_response('Finishing the current skill request before quitting...', error=True)
             self.result.show()

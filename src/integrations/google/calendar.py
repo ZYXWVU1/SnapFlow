@@ -12,6 +12,12 @@ class GoogleCalendarProvider:
         response = self.api.request('GET', 'users/me/calendarList')
         return response.get('items', [])
 
+    def primary_calendar(self):
+        response = self.api.request('GET', 'users/me/calendarList/primary')
+        if not isinstance(response, dict):
+            raise ValueError('Google did not return primary calendar details.')
+        return response
+
     def test_connection(self):
         self.list_calendars()
         return True

@@ -10,8 +10,9 @@ ALLOWED_ORIGINS = frozenset({
 
 
 class ApiFailure(RuntimeError):
-    def __init__(self, kind, message):
+    def __init__(self, kind, message, status_code=None):
         self.kind = kind
+        self.status_code = status_code
         super().__init__(message)
 
 
@@ -39,7 +40,8 @@ class FixedApiClient:
                 raise ApiFailure('unknown_result', 'The service response is unknown. Review the account before retrying.') from None
             raise ApiFailure('failed', 'Unable to reach the service. Try again later.') from None
         if response.status_code in (401, 403):
-            raise ApiFailure('needs_reconnect', 'Service authorization needs attention.')
+            raise ApiFailure('needs_reconnect', 'Service authorization needs attention.',
+                             response.status_code)
         if not 200 <= response.status_code < 300:
             raise ApiFailure('failed', 'The service could not complete the request.')
         try:

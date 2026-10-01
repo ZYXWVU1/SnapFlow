@@ -7,23 +7,18 @@ from src.ui.design.tokens import SPACING
 
 
 class GoogleConnectDialog(QDialog):
-    submitted = Signal(str, object)
+    submitted = Signal(object)
 
-    def __init__(self, client_id='', parent=None, capabilities=()):
+    def __init__(self, parent=None, capabilities=()):
         super().__init__(parent)
         self.setWindowTitle('Connect Google')
-        self.resize(500, 380)
+        self.resize(500, 320)
         root = QVBoxLayout(self)
         root.setContentsMargins(SPACING['xl'], SPACING['xl'], SPACING['xl'], SPACING['xl'])
         root.addWidget(PageHeader('Connect Google',
-            'Choose where Visual Workflows may create data. Your browser will ask for consent.'))
+            'Sign in to Google, then approve the Calendar or Sheets access you choose.'))
         card = Card()
-        card.content.addWidget(QLabel('Desktop OAuth client ID'))
-        self.client_id = QLineEdit(client_id)
-        self.client_id.setPlaceholderText('...apps.googleusercontent.com')
-        self.client_id.setAccessibleName('Google Desktop OAuth client ID')
-        card.content.addWidget(self.client_id)
-        note = QLabel('Use a Desktop OAuth client from Google Cloud. This public ID is kept in Windows Credential Manager.')
+        note = QLabel('Google will show the requested permissions in your browser before connecting.')
         note.setWordWrap(True)
         note.setProperty('role', 'muted')
         card.content.addWidget(note)
@@ -42,15 +37,14 @@ class GoogleConnectDialog(QDialog):
         root.addWidget(self.connect_button)
 
     def submit(self):
-        client_id = self.client_id.text().strip()
         capabilities = tuple(name for checked, name in (
             (self.calendar.isChecked(), 'google_calendar'),
             (self.sheets.isChecked(), 'google_sheets')) if checked)
-        if not client_id.endswith('.apps.googleusercontent.com') or not capabilities:
-            self.error.setText('Enter a Desktop OAuth client ID and choose at least one capability.')
+        if not capabilities:
+            self.error.setText('Choose at least one Google service to connect.')
             return
         self.error.clear()
-        self.submitted.emit(client_id, capabilities)
+        self.submitted.emit(capabilities)
         self.accept()
 
 

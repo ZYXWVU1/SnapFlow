@@ -58,7 +58,7 @@ class GoogleOAuth:
         except ValueError:
             port = None
         if (parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or
-            parsed.username or parsed.password or not port or parsed.path != '/' or
+            parsed.username or parsed.password or not port or parsed.path not in ('', '/') or
             parsed.query or parsed.fragment or not 43 <= len(verifier) <= 128):
             raise ValueError('Invalid desktop authorization request.')
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode('ascii')).digest()).rstrip(b'=').decode('ascii')
@@ -73,7 +73,22 @@ class GoogleOAuth:
         try:
             response = self.http.post(TOKEN_URL, data=data)
             if response.status_code != 200:
-                raise OAuthFailure('Google authorization needs to be renewed.')
+                try:
+                    error_payload = response.json()
+                except ValueError:
+                    error_payload = None
+                error_code = error_payload.get('error') if isinstance(error_payload, dict) else None
+                if isinstance(error_code, dict):
+                    error_code = error_code.get('status') or error_code.get('code')
+                if not isinstance(error_code, str) or not error_code.isascii() or \
+                        not error_code.replace('_', '').isalnum() or len(error_code) > 64:
+                    error_code = f'HTTP {response.status_code}'
+                description = error_payload.get('error_description') \
+                    if isinstance(error_payload, dict) else None
+                if isinstance(description, str):
+                    description = ' '.join(description.split())[:180]
+                suffix = f': {description}' if description else ''
+                raise OAuthFailure(f'Google token exchange failed ({error_code}){suffix}.')
             payload = response.json()
             if not isinstance(payload, dict) or not isinstance(payload.get('access_token'), str):
                 raise OAuthFailure('Google returned an invalid authorization response.')
@@ -164,7 +179,7 @@ class GoogleOAuth:
 
         server = HTTPServer(('127.0.0.1', 0), Callback)
         server.timeout = timeout
-        redirect_uri = f'http://127.0.0.1:{server.server_port}/'
+        redirect_uri = f'http://127.0.0.1:{server.server_port}'
         try:
             url = self.authorization_url(capabilities, redirect_uri, state, verifier)
             if not self.browser_open(url):
