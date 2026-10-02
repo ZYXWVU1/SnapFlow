@@ -30,6 +30,8 @@ class ContextSession:
     permission_version: int = 0
     created_at: str = field(default_factory=_now)
     history: list[ContextTurn] = field(default_factory=list)
+    external_sources: tuple = ()
+    external_prompt: str = ''
 
     @classmethod
     def new(cls, screenshot_reference: str):
@@ -51,6 +53,8 @@ class ContextRequest:
     conversation_enabled: bool
     permission_version: int
     created_at: str
+    external_sources: tuple = ()
+    external_prompt: str = ''
 
     @classmethod
     def new(cls, session: ContextSession, question: str, *, current_skill_result=None,
@@ -60,7 +64,7 @@ class ContextRequest:
         return cls(uuid4().hex, session.session_id, session.screenshot_reference,
             current_skill_result, question, chosen_scope, ids,
             chosen_scope == 'authorized_memory_search', conversation_enabled,
-            session.permission_version, _now())
+            session.permission_version, _now(), tuple(session.external_sources), session.external_prompt)
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,10 @@ class ContextSource:
     saved_at: str | None = None
     source_date: str | None = None
     relevance_score: float | None = None
+    connection_id: str | None = None
+    resource_uri: str | None = None
+    retrieved_at: str | None = None
+    mime_type: str | None = None
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,27 @@ from src.context.models import SCOPES
 
 
 class ContextPermissionService:
+    def select_external_prompt(self, session, text):
+        if not isinstance(text, str) or len(text.encode('utf-8')) > 16000:
+            raise ValueError('External prompt exceeds its size limit.')
+        session.external_prompt = text
+        session.permission_version += 1
+        session.history.clear()
+
+    def select_external_sources(self, session, sources):
+        from src.context.models import ContextSource
+        sources = tuple(sources)
+        if len(sources) > 4 or any(not isinstance(source, ContextSource) or
+                source.source_type not in ('mcp_resource', 'trusted_extension') or not source.connection_id or not source.resource_uri or
+                source.memory_id is not None or source.memory_revision is not None or source.screenshot_reference is not None or
+                not isinstance(source.content, str) or len(source.content.encode('utf-8')) > 65536 for source in sources):
+            raise ValueError('Select at most four bounded external text resources.')
+        if len({(s.connection_id, s.resource_uri) for s in sources}) != len(sources):
+            raise ValueError('Duplicate MCP resource selection.')
+        session.external_sources = sources
+        session.permission_version += 1
+        session.history.clear()
+
     def grant_selected(self, session, memory_ids):
         ids = tuple(dict.fromkeys(memory_ids))
         if not ids or len(ids) > 8 or any(not isinstance(item, str) or not item for item in ids):
@@ -27,6 +48,8 @@ class ContextPermissionService:
         session.permission_version += 1
         # Old answers may contain private source text; never resend them after revocation.
         session.history.clear()
+        session.external_sources = ()
+        session.external_prompt = ''
 
     def exclude_source(self, session, memory_id):
         if session.scope == 'selected_memories':
@@ -57,6 +80,8 @@ class ContextPermissionService:
         return True
 
     def validate_request(self, session, request):
+        if request.external_sources != session.external_sources or request.external_prompt != session.external_prompt:
+            raise ValueError('Only explicitly selected MCP resources are authorized.')
         if (request.session_id != session.session_id or
                 request.screenshot_reference != session.screenshot_reference or
                 request.permission_version != session.permission_version):

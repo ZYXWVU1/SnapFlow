@@ -17,11 +17,12 @@ class ApiFailure(RuntimeError):
 
 
 class FixedApiClient:
-    def __init__(self, base_url, token, *, transport=None, timeout=15.0):
+    def __init__(self, base_url, token, *, transport=None, timeout=15.0, execution_guard=None):
         if base_url not in ALLOWED_ORIGINS:
             raise ValueError('Unsupported service origin.')
         self.base_url = base_url
         self.token = token
+        self.execution_guard = execution_guard
         self.client = httpx.Client(base_url=base_url, transport=transport,
                                    timeout=timeout, follow_redirects=False)
 
@@ -29,7 +30,9 @@ class FixedApiClient:
         if method not in ('GET', 'POST') or not isinstance(path, str) or not path or \
                 path.startswith('/') or '://' in path or '..' in path:
             raise ValueError('Unsupported service request.')
+        self._check_guard()
         token = self.token()
+        self._check_guard()
         if not token:
             raise ApiFailure('disconnected', 'Integration is not connected.')
         try:
@@ -51,3 +54,7 @@ class FixedApiClient:
 
     def close(self):
         self.client.close()
+
+    def _check_guard(self):
+        if self.execution_guard is not None and not self.execution_guard():
+            raise ApiFailure('cancelled', 'Workflow request cancelled or revoked.')

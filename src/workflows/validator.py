@@ -64,7 +64,7 @@ def validate_workflow(workflow, skills, actions=None):
         if action is None:
             errors.append(f'Unknown action: {step.action_id}.')
             continue
-        if action.id not in skill.action_ids and action.id not in WORKFLOW_ACTIONS:
+        if action.id not in skill.action_ids and action.id not in WORKFLOW_ACTIONS and action.kind != 'mcp':
             errors.append(f'Action is not available for this Skill: {action.id}.')
         if action.integration_id:
             from src.integrations.actions import validate_config as validate_external_config
@@ -83,4 +83,6 @@ def validate_workflow(workflow, skills, actions=None):
                             errors.append(f'Unknown template field: {field}.')
         if workflow.auto_run and action.risk_level not in ('read_only', 'clipboard', 'local_write', 'external_write'):
             errors.append('This action requires manual execution.')
+        if workflow.auto_run and action.kind == 'mcp':
+            errors.append('MCP Actions require manual Workflow execution.')
     return errors

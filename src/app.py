@@ -16,6 +16,8 @@ from src.memory.recall import MemoryRecallService
 from src.context.models import ContextRequest, ContextSession
 from src.context.permissions import ContextPermissionService
 from src.context.controller import ContextController
+from src.mcp.client.storage import MCPStorage
+from src.ui.extensions.service import ExtensionService
 from src.suggestions.service import ActionSuggestionService
 from src.skill_actions import execute_action
 from src.app_version import APP_NAME, APP_VERSION
@@ -224,10 +226,17 @@ class ApplicationController(QObject):
         self.integration_pool = QThreadPool(self)
         self.integration_pool.setMaxThreadCount(2)
         self.integration_jobs = {}
+        self.extension_service = ExtensionService(MCPStorage(paths=self.paths), self.credential_service, self)
+        self.mcp_shutdown_future = None
         self.calendar_event_worker = None
         self.integration_dialogs = []
         self.workflow_pool = QThreadPool(self)
         self.workflow_pool.setMaxThreadCount(1)
+        from src.ui.extensions.server_service import MCPServerService
+        self.server_service = MCPServerService(self.paths, self.credential_service, self.memory_store,
+            self.skill_registry, self.workflow_storage, self.workflow_history, self.workflow_pool,
+            self.integration_service, self.extension_service, self)
+        self.extension_service.server_service = self.server_service
         self.workflow_jobs = {}
         self._auto_seen = set()
         self._workflow_results = []
@@ -254,7 +263,11 @@ class ApplicationController(QObject):
         self.main_window = MainWindow(self.config.hotkey, skills_storage=self.custom_storage,
             workflows_storage=self.workflow_storage, history=self.workflow_history, config=self.config,
             integration_registry=self.integration_registry, connection_storage=self.connection_storage,
-            paths=self.paths, memory_store=self.memory_store)
+            paths=self.paths, memory_store=self.memory_store, extension_service=self.extension_service)
+        self.extension_service.approval_parent = self.main_window
+        self.server_service.approval_parent = self.main_window
+        self.extension_service.resource_selected.connect(self.select_mcp_context_resource)
+        self.extension_service.prompt_selected.connect(self.select_mcp_context_prompt)
         self.main_window.pages['evaluation'].client = self.client
         self.main_window.pages['evaluation'].usage_storage = self.usage_storage
         self.main_window.pages['evaluation'].max_evaluation_cases = self.config.max_evaluation_cases
@@ -311,6 +324,8 @@ class ApplicationController(QObject):
         app.setWindowIcon(icon)
         self.tray = QSystemTrayIcon(icon, self)
         self.workflow_bridge = WorkflowBridge(self.tray, self.ask_about_result, self)
+        self.server_service.workflow_bridge = self.workflow_bridge
+        self.server_service.start()
         self.tray.setToolTip(APP_NAME)
         self.menu = QMenu()
         self.home_action = self.menu.addAction("Open Home", self.open_home)
@@ -403,8 +418,51 @@ class ApplicationController(QObject):
         dialog.suggestion_requested.connect(self.execute_context_suggestion)
         dialog.cancel_requested.connect(self.cancel_context_request)
         dialog.closed.connect(self.close_context_session)
+        dialog.external_source_removed.connect(self.remove_mcp_context_resource)
         self.context_dialog = dialog
         dialog.show()
+
+    def select_mcp_context_resource(self, source):
+        self.open_context_assistant()
+        if self.context_session is None or self.context_dialog is None:
+            self.main_window.toast.show_message('Analyze a screenshot and enable Contextual Assistant before selecting external context.')
+            return
+        try:
+            retained = tuple(s for s in self.context_session.external_sources
+                if (s.connection_id, s.resource_uri) != (source.connection_id, source.resource_uri))
+            self.context_permissions.select_external_sources(self.context_session, retained + (source,))
+            self.context_dialog.set_external_sources(self.context_session.external_sources)
+            self.context_latest_request = None
+        except ValueError as exc:
+            self.context_dialog.show_error(str(exc))
+
+    def remove_mcp_context_resource(self, connection_id, uri):
+        if self.context_session is not None:
+            retained = tuple(s for s in self.context_session.external_sources
+                if (s.connection_id, s.resource_uri) != (connection_id, uri))
+            self.context_permissions.select_external_sources(self.context_session, retained)
+            self.context_latest_request = None
+            if self.context_dialog:
+                self.context_dialog.set_external_sources(retained)
+
+    def select_mcp_context_prompt(self, text):
+        box = QMessageBox(self.main_window)
+        box.setWindowTitle('Use external MCP prompt')
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText('Use this reviewed external template in your next contextual question? SnapFlow permissions still apply.')
+        box.setDetailedText(text)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self.open_context_assistant()
+        if self.context_session is not None and self.context_dialog is not None:
+            self.context_permissions.select_external_prompt(self.context_session, text)
+            self.context_latest_request = None
+            self.context_dialog.question.setText('Use my selected external template with the authorized sources.')
+            self.context_dialog.show_error('External template selected. Press Ask to send it with your chosen sources.')
+        else:
+            self.main_window.toast.show_message('Analyze a screenshot and enable Contextual Assistant before using a template.')
 
     def _current_context_data(self):
         result = self.last_result
@@ -498,10 +556,12 @@ class ApplicationController(QObject):
         self.context_dialog.show_error('Copied current result details to clipboard.')
 
     def revoke_context_permission(self):
-        if self.context_session is not None and self.context_session.scope != 'current_only':
+        if self.context_session is not None:
             self.context_permissions.revoke_permission(self.context_session)
             self.context_latest_request = None
             self.context_suggestions.clear()
+            if self.context_dialog is not None:
+                self.context_dialog.set_external_sources(())
 
     def context_scope_changed(self, scope):
         if self.context_session is not None and self.context_session.scope != 'current_only':
@@ -510,6 +570,7 @@ class ApplicationController(QObject):
             self.context_suggestions.clear()
             if self.context_dialog is not None:
                 self.context_dialog.show_suggestions(())
+                self.context_dialog.set_external_sources(())
 
     def cancel_context_request(self):
         if self.context_session is not None:
@@ -1045,7 +1106,8 @@ class ApplicationController(QObject):
         context = WorkflowContext.from_result(self.last_result, request_id=str(self.request_id))
         worker = WorkflowWorker(workflow, context, WorkflowExecutor(self.skill_registry), self.workflow_bridge,
                                 preview=preview, storage=self.workflow_storage,
-                                integration_service=self.integration_service)
+                                integration_service=self.integration_service,
+                                mcp_approval=self.extension_service.approve)
         worker.signals.finished.connect(self.workflow_finished)
         self.workflow_jobs[request_key] = worker
         for button in self.result.workflow_buttons:
@@ -1656,6 +1718,8 @@ class ApplicationController(QObject):
 
     def quit(self) -> None:
         self.quitting = True
+        self.server_service.close()
+        self.mcp_shutdown_future = self.extension_service.begin_shutdown()
         self.hotkeys.close()
         self.clear_overlays()
         self.main_window.close()
@@ -1674,7 +1738,10 @@ class ApplicationController(QObject):
             self.finish_quit()
 
     def finish_quit(self) -> None:
-        if (QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or
+        if self.mcp_shutdown_future is not None and not self.mcp_shutdown_future.done():
+            QTimer.singleShot(50, self.finish_quit)
+            return
+        if (QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or self.server_service.active_workflows or
                 self.integration_jobs or self.calendar_event_worker is not None or
                 self.memory_recall_worker is not None or
                 self.context_workers):

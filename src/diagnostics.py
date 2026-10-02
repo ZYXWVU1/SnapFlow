@@ -53,6 +53,8 @@ def redact_text(value, *, home=None):
 
 class RedactingFormatter(logging.Formatter):
     def format(self, record):
+        from src.mcp.client.diagnostics import redact_sdk_record
+        redact_sdk_record(record)
         record.msg = redact_text(record.getMessage())
         record.args = ()
         return redact_text(super().format(record))

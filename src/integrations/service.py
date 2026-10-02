@@ -146,7 +146,11 @@ class IntegrationService:
             return ActionResult(False, str(exc) if isinstance(exc, ValueError) else
                 'Google Calendar could not complete the event.')
 
-    def execute_action(self, action_id, result, config):
+    def execute_action(self, action_id, result, config, *, execution_guard=None, cancel=None):
+        def current():
+            return (cancel is None or not cancel.is_set()) and (execution_guard is None or execution_guard())
+        if not current():
+            return ActionResult(False, 'Workflow request cancelled or revoked.')
         capability = EXTERNAL_ACTIONS.get(action_id)
         if capability is None:
             return ActionResult(False, 'Unknown cloud Action.')
@@ -159,13 +163,19 @@ class IntegrationService:
         try:
             data = prepare(action_id, result, config)
             if action_id == 'google_calendar_create_event':
-                created = self._calendar(self._google_auth()).create_event(**data)
+                provider = self._calendar(self._google_auth())
+                provider.api.execution_guard = current
+                created = provider.create_event(**data)
                 message = 'Google Calendar event created.'
             elif action_id == 'google_sheets_append_row':
-                created = self._sheets(self._google_auth()).append_row(**data)
+                provider = self._sheets(self._google_auth())
+                provider.api.execution_guard = current
+                created = provider.append_row(**data)
                 message = 'Row added to Google Sheets.'
             else:
-                created = self._todoist().create_task(**data)
+                provider = self._todoist()
+                provider.api.execution_guard = current
+                created = provider.create_task(**data)
                 message = 'Todoist task created.'
             if not isinstance(created, dict):
                 return ActionResult(False, 'The service returned an unreadable result. Review the account before retrying.')

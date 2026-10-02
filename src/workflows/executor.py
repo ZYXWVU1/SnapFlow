@@ -52,7 +52,7 @@ class WorkflowExecutor:
             action = self.actions[step.action_id]
             try:
                 source = context.result
-                if (action.id not in source.actions and action.id not in WORKFLOW_ACTIONS) or not action.enabled(source):
+                if (action.id not in source.actions and action.id not in WORKFLOW_ACTIONS and action.kind != 'mcp') or not action.enabled(source):
                     response = ActionResult(False, 'Required information or action availability is missing.')
                 elif preview:
                     outcome.preview = action.preview(source, deepcopy(step.config))
@@ -65,6 +65,9 @@ class WorkflowExecutor:
                     raise TypeError('Invalid action result.')
                 outcome.status = 'success' if response.success else 'failed'
                 outcome.message = response.message
+                if cancel is not None and cancel.is_set():
+                    outcome.status = 'cancelled'
+                    return finish('cancelled')
                 if not response.success:
                     outcome.error = response.message or 'Action failed.'
             except Exception as exc:

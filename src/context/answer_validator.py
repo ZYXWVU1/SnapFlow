@@ -2,7 +2,7 @@
 import re
 
 
-_REF = re.compile(r'\[([A-Za-z]\d+)\]')
+_REF = re.compile(r'\[((?:MCP|[A-Za-z])\d+)\]')
 _MONEY = re.compile(r'[$€£]\s*(\d[\d,]*(?:\.\d+)?)')
 
 

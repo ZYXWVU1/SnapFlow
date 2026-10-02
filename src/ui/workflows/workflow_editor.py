@@ -13,6 +13,7 @@ from .column_mapping import ColumnMappingEditor
 from .resource_picker import ResourcePicker
 from .resource_worker import ResourceWorker
 from src.ui.design.components import AppButton, Card, PageHeader
+from src.ui.extensions.schema_form import SchemaForm
 
 OPERATORS = ('exists', 'not_exists', 'equals', 'not_equals', 'contains', 'not_contains',
              'greater_than', 'less_than', 'is_empty', 'is_not_empty')
@@ -145,6 +146,7 @@ class WorkflowEditor(QDialog):
     def available_actions(self):
         skill = self.skills.get(self.trigger.currentData())
         keys = list(skill.action_ids) + sorted(WORKFLOW_ACTIONS) if skill else []
+        keys += [key for key, action in ACTIONS.items() if action.kind == 'mcp']
         return [ACTIONS[key] for key in keys if key in ACTIONS]
 
     def trigger_changed(self):
@@ -216,7 +218,8 @@ class WorkflowEditor(QDialog):
             elif action_id == 'todoist_create_task':
                 config = {'title': '{title}', 'priority': 1}
             else:
-                config = {key: '' for key in action.config_schema}
+                config = ({'arguments': {}, 'schema_fingerprint': action.descriptor.fingerprint}
+                    if action.kind == 'mcp' else {key: '' for key in action.config_schema})
             self.steps.append(WorkflowStep('step_' + uuid.uuid4().hex[:12], action_id, config))
             self.refresh_steps()
             self.step_list.setCurrentRow(len(self.steps) - 1)
@@ -232,14 +235,21 @@ class WorkflowEditor(QDialog):
     def save_config(self):
         index = self.step_list.currentRow()
         if index >= 0 and index < len(self.steps) and self.config_inputs:
-            self.update_step_config(index)
+            return self.update_step_config(index)
+        return True
 
     def update_step_config(self, index):
         if 0 <= index < len(self.steps):
             old = self.steps[index]
             config = {}
             for key, widget in self.config_inputs.items():
-                if isinstance(widget, ColumnMappingEditor):
+                if isinstance(widget, SchemaForm):
+                    try:
+                        config[key] = widget.value()
+                    except (ValueError, TypeError):
+                        self.error.setText('Enter valid bounded JSON arguments.')
+                        return False
+                elif isinstance(widget, ColumnMappingEditor):
                     config[key] = widget.value()
                 elif isinstance(widget, ResourcePicker):
                     config[key] = widget.value()
@@ -252,6 +262,7 @@ class WorkflowEditor(QDialog):
                 else:
                     config[key] = widget.text()
             self.steps[index] = replace(old, config=config)
+        return True
 
     def show_config(self, index):
         while self.config_layout.rowCount():
@@ -265,6 +276,30 @@ class WorkflowEditor(QDialog):
         step = self.steps[index]
         action = ACTIONS.get(step.action_id)
         if action:
+            if action.kind == 'mcp':
+                form = SchemaForm(action.descriptor.input_schema, step.config.get('arguments', {}))
+                fingerprint = QLineEdit(step.config.get('schema_fingerprint', ''))
+                fingerprint.setReadOnly(True)
+                self.config_inputs = {'arguments': form, 'schema_fingerprint': fingerprint}
+                self.config_layout.addRow('Tool arguments', form)
+                self.config_layout.addRow('Reviewed schema', fingerprint)
+                form.changed.connect(lambda row=index: self.update_step_config(row))
+                advanced = AppButton('Use Advanced JSON for field mappings')
+                def use_json():
+                    if not self.save_config():
+                        return
+                    json_form = SchemaForm(action.descriptor.input_schema,
+                        self.steps[index].config.get('arguments', {}), advanced=True)
+                    self.config_layout.removeRow(0)
+                    self.config_layout.insertRow(0, 'Tool arguments (JSON)', json_form)
+                    self.config_inputs['arguments'] = json_form
+                    json_form.changed.connect(lambda row=index: self.update_step_config(row))
+                    advanced.setEnabled(False)
+                advanced.clicked.connect(use_json)
+                self.config_layout.addRow(advanced)
+                self.integration_status.setText('MCP Actions run manually. Dry Run sends no tool call. If the schema changes, remove and re-add this step after review.')
+                self.integration_status.show()
+                return
             if action.integration_id and self.connection_storage is not None:
                 connection = self.connection_storage.get(action.integration_id)
                 capability = {'google_calendar_create_event': 'google_calendar',
@@ -364,7 +399,8 @@ class WorkflowEditor(QDialog):
             self.refresh_steps()
 
     def definition(self):
-        self.save_config()
+        if not self.save_config():
+            raise ValueError('Enter valid bounded JSON arguments before saving.')
         skill = self.skills.get(self.trigger.currentData())
         if skill is None:
             raise ValueError('Choose an enabled Visual Skill.')

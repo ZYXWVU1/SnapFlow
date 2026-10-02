@@ -26,16 +26,25 @@ def _lock_for(path):
 
 
 class WorkflowEffects:
-    def __init__(self, ui_action=None, integration_service=None):
+    def __init__(self, ui_action=None, integration_service=None, mcp_approval=None, *, cancel=None, execution_guard=None):
         self.ui_action = ui_action
         self.integration_service = integration_service
+        self.mcp_approval = mcp_approval
+        self.cancel = cancel
+        self.execution_guard = execution_guard
 
     def execute(self, action, result, config):
         try:
+            if (self.cancel is not None and self.cancel.is_set()) or (self.execution_guard is not None and not self.execution_guard()):
+                return ActionResult(False, 'Workflow request cancelled or revoked.')
+            if action.kind == 'mcp':
+                return action.execute(result, config, approval=self.mcp_approval,
+                    cancel=self.cancel, execution_guard=self.execution_guard)
             if action.integration_id:
                 if self.integration_service is None:
                     return ActionResult(False, 'Integration service is unavailable.')
-                return self.integration_service.execute_action(action.id, result, config)
+                return self.integration_service.execute_action(action.id, result, config,
+                    execution_guard=self.execution_guard, cancel=self.cancel)
             if action.kind == 'notification':
                 title = render_template(config['title'], result.data)
                 message = render_template(config['message'], result.data)
@@ -52,6 +61,8 @@ class WorkflowEffects:
                 if not destination.is_absolute() or not destination.parent.is_dir():
                     return ActionResult(False, 'Choose an existing absolute file destination.')
                 with _lock_for(destination):
+                    if (self.cancel is not None and self.cancel.is_set()) or (self.execution_guard is not None and not self.execution_guard()):
+                        return ActionResult(False, 'Workflow request cancelled or revoked.')
                     if action.kind == 'append_csv':
                         records = list(csv.reader(io.StringIO(payload)))
                         if not records or len(records) < 2:
@@ -64,6 +75,8 @@ class WorkflowEffects:
                             with destination.open('rb') as stream:
                                 stream.seek(-1, 2)
                                 needs_newline = stream.read(1) not in (b'\n', b'\r')
+                            if (self.cancel is not None and self.cancel.is_set()) or (self.execution_guard is not None and not self.execution_guard()):
+                                return ActionResult(False, 'Workflow request cancelled or revoked.')
                             with destination.open('a', encoding='utf-8', newline='') as stream:
                                 if needs_newline:
                                     stream.write('\n')

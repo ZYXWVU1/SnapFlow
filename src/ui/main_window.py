@@ -14,14 +14,16 @@ from src.ui.pages.memory import MemoryPage
 from src.ui.pages.settings import SettingsPage
 from src.ui.integrations.integration_page import IntegrationPage
 from src.ui.evaluation.page import EvaluationPage
+from src.ui.extensions.extensions_page import ExtensionsPage
 
 
-PAGES = ('home', 'memory', 'skills', 'workflows', 'integrations', 'evaluation', 'history', 'settings')
+PAGES = ('home', 'memory', 'skills', 'workflows', 'integrations', 'extensions', 'evaluation', 'history', 'settings')
 _PAGE_COPY = {
     'memory': ('Visual Memory', 'Search information you explicitly saved.', None),
     'skills': ('Visual Skills', 'Teach AI to recognize the screenshots that matter to you.', 'Open Visual Skills'),
     'workflows': ('Workflows', 'Choose what happens after a Visual Skill matches.', 'Open Visual Workflows'),
     'integrations': ('Integrations', 'Connect your tools and send structured data where it belongs.', None),
+    'extensions': ('Extensions', 'Connect MCP servers and review external capabilities.', None),
     'evaluation': ('Evaluation', 'Measure Visual Skills using verified examples.', None),
     'history': ('History', 'Review recent workflow outcomes.', 'Open Workflow History'),
     'settings': ('Settings', 'Control capture, AI, and appearance preferences.', 'Open Settings'),
@@ -53,7 +55,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, hotkey, parent=None, *, skills_storage=None, workflows_storage=None,
                  history=None, config=None, integration_registry=None, connection_storage=None, paths=None,
-                 memory_store=None):
+                 memory_store=None, extension_service=None):
         super().__init__(parent)
         self.setObjectName('AppShell')
         self.setWindowTitle(APP_NAME)
@@ -147,6 +149,8 @@ class MainWindow(QMainWindow):
                 widget.onboarding_requested.connect(self.onboarding_requested)
                 widget.memory_rebuild_requested.connect(self.memory_rebuild_requested)
                 self.launch_buttons[page] = widget.edit_button
+            elif page == 'extensions' and extension_service is not None:
+                widget = ExtensionsPage(extension_service)
             else:
                 widget = self._build_feature_page(page)
             self.pages[page] = widget

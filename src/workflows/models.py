@@ -58,7 +58,15 @@ class WorkflowStep:
 
     def __post_init__(self):
         identifier(self.id)
-        identifier(self.action_id)
+        if isinstance(self.action_id, str) and self.action_id.startswith('mcp:'):
+            parts = self.action_id.split(':')
+            if len(parts) != 3:
+                raise ValueError('Invalid MCP Action identifier.')
+            from src.mcp.client.models import valid_id, valid_tool_name
+            valid_id(parts[1])
+            valid_tool_name(parts[2])
+        else:
+            identifier(self.action_id)
         boolean(self.enabled)
         if not isinstance(self.config, dict):
             raise ValueError('Action configuration must be an object.')

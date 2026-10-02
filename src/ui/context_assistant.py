@@ -20,6 +20,7 @@ class ContextAssistantDialog(QDialog):
     suggestion_requested = Signal(str)
     cancel_requested = Signal()
     closed = Signal()
+    external_source_removed = Signal(str, str)
 
     def __init__(self, store, parent=None, *, memory_enabled=True, memory_search_enabled=True):
         super().__init__(parent)
@@ -84,6 +85,15 @@ class ContextAssistantDialog(QDialog):
         self.selected_summary.setTextFormat(Qt.TextFormat.PlainText)
         self.memory_card.content.addWidget(self.selected_summary)
         left_layout.addWidget(self.memory_card)
+        external_card = Card()
+        external_card.content.addWidget(QLabel('Selected MCP resources'))
+        self.external_summary = QLabel('None selected. Choose a resource in Extensions.')
+        self.external_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.external_summary.setWordWrap(True)
+        external_card.content.addWidget(self.external_summary)
+        self.external_layout = QVBoxLayout()
+        external_card.content.addLayout(self.external_layout)
+        left_layout.addWidget(external_card)
         left_layout.addStretch()
 
         answer_card = Card()
@@ -237,7 +247,9 @@ class ContextAssistantDialog(QDialog):
         self._clear_source_buttons()
         for source in result.sources:
             button = AppButton(f'[{source.source_id}] {source.title}', variant='secondary')
-            if source.memory_id:
+            if source.source_type == 'mcp_resource':
+                button.clicked.connect(lambda checked=False, current=source: self.preview_external_source(current))
+            elif source.memory_id:
                 button.clicked.connect(lambda checked=False, memory_id=source.memory_id:
                                        self.memory_open_requested.emit(memory_id))
             else:
@@ -315,13 +327,13 @@ class ContextAssistantDialog(QDialog):
             cursor.insertBlock()
         normal = QTextCharFormat()
         sources = {source.source_id: source for source in result.sources} if result else {}
-        for part in re.split(r'(\[[A-Za-z]\d+\])', value):
+        for part in re.split(r'(\[(?:MCP|[A-Za-z])\d+\])', value):
             source = sources.get(part[1:-1]) if part.startswith('[') else None
             if source is None:
                 cursor.insertText(part, normal)
                 continue
             href = f'context-source:{result.request_id}:{source.source_id}'
-            self._citation_targets[href] = source.memory_id
+            self._citation_targets[href] = source
             linked = QTextCharFormat()
             linked.setAnchor(True)
             linked.setAnchorHref(href)
@@ -333,11 +345,38 @@ class ContextAssistantDialog(QDialog):
         href = url.toString()
         if href not in self._citation_targets:
             return
-        memory_id = self._citation_targets[href]
-        if memory_id is None:
+        source = self._citation_targets[href]
+        if source.source_type == 'mcp_resource':
+            self.preview_external_source(source)
+        elif source.memory_id is None:
             self.current_source_requested.emit()
         else:
-            self.memory_open_requested.emit(memory_id)
+            self.memory_open_requested.emit(source.memory_id)
+
+    def set_external_sources(self, sources):
+        while self.external_layout.count():
+            item = self.external_layout.takeAt(0)
+            if item.widget():
+                item.widget().hide()
+                item.widget().deleteLater()
+        self.external_summary.setText(', '.join(source.title for source in sources) or 'None selected.')
+        for source in sources:
+            preview = AppButton(f'Preview · {source.title}')
+            preview.clicked.connect(lambda checked=False, current=source: self.preview_external_source(current))
+            self.external_layout.addWidget(preview)
+            remove = AppButton(f'Remove · {source.title}', variant='ghost')
+            remove.clicked.connect(lambda checked=False, current=source:
+                self.external_source_removed.emit(current.connection_id, current.resource_uri))
+            self.external_layout.addWidget(remove)
+
+    def preview_external_source(self, source):
+        from PySide6.QtWidgets import QMessageBox
+        box = QMessageBox(self)
+        box.setWindowTitle('MCP resource preview')
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(f'{source.title}\nServer: {source.connection_id}\nURI: {source.resource_uri}')
+        box.setDetailedText(source.content)
+        box.exec()
 
     def _revoke(self):
         self._cancel()
