@@ -1,6 +1,6 @@
 """Metadata-only Workflow history page."""
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QVBoxLayout
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QListWidget
 
 from src.ui.design.components import Badge, PageHeader
 from .common import NamedCard, ScrollPage
@@ -10,6 +10,7 @@ class HistoryPage(ScrollPage):
     def __init__(self, history=None, parent=None):
         super().__init__(parent)
         self.history = history
+        self.ai_history = None
         self.entries = []
         self.content.addWidget(PageHeader('History', 'Recent Workflow outcomes on this device.'))
         self.list = QVBoxLayout()
@@ -17,6 +18,10 @@ class HistoryPage(ScrollPage):
         self.empty_state = NamedCard('No workflow activity yet',
             'Workflow outcomes will appear here after an action runs.')
         self.content.addWidget(self.empty_state)
+        self.content.addWidget(QLabel('AI Execution · metadata only'))
+        self.ai_entries = QListWidget()
+        self.ai_entries.setMinimumHeight(160)
+        self.content.addWidget(self.ai_entries)
         self.content.addStretch(1)
         self.refresh()
 
@@ -36,3 +41,9 @@ class HistoryPage(ScrollPage):
             self.list.addWidget(card)
             self.entries.append(card)
         self.empty_state.setVisible(not self.entries)
+        self.ai_entries.clear()
+        if self.ai_history:
+            for entry in self.ai_history.recent():
+                location = 'LOCAL' if entry['local'] else 'HYBRID → CLOUD' if entry['fallback'] else 'CLOUD'
+                self.ai_entries.addItem(f"{entry['timestamp'][:19]} · {location} · {entry['model_id']}\n"
+                    f"{entry['runtime_id']} · {entry['latency_ms']:.0f} ms · " + ', '.join(entry['reasons']))

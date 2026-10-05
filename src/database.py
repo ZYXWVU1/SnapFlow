@@ -6,7 +6,7 @@ import sqlite3
 import uuid
 
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 class DatabaseMigrationError(RuntimeError):
@@ -150,6 +150,23 @@ def _migrate_visual_memory(connection):
 _MIGRATIONS[3] = _migrate_visual_memory
 
 
+def _migrate_ai_runtime(connection):
+    connection.execute('''CREATE TABLE memory_embeddings (
+        namespace TEXT NOT NULL, memory_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+        revision TEXT NOT NULL, dimension INTEGER NOT NULL, vector TEXT NOT NULL,
+        PRIMARY KEY(namespace, memory_id))''')
+    connection.execute('''CREATE TABLE ai_execution_history (
+        request_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, runtime_id TEXT NOT NULL,
+        model_id TEXT NOT NULL, local INTEGER NOT NULL, latency_ms REAL NOT NULL,
+        private_mode INTEGER NOT NULL, fallback INTEGER NOT NULL, reasons TEXT NOT NULL,
+        image_metadata TEXT)''')
+    connection.execute('INSERT INTO schema_migrations VALUES (?, ?, ?)',
+        (5, datetime.now(timezone.utc).isoformat(), 'Add compatible local embeddings and content-free AI execution history.'))
+
+
+_MIGRATIONS[4] = _migrate_ai_runtime
+
+
 def initialize_learning_database(path, backup_dir=None):
     """Apply ordered schema migrations, backing up the database before upgrades."""
     path = Path(path)
@@ -184,6 +201,9 @@ def initialize_learning_database(path, backup_dir=None):
             backup_sqlite_database(path, backup_path)
 
         try:
+            # SQLite DDL does not start an implicit Python transaction. Begin
+            # before any migration statement so interruption rolls back DDL too.
+            connection.execute('BEGIN IMMEDIATE')
             with connection:
                 while version < CURRENT_SCHEMA_VERSION:
                     migration = _MIGRATIONS.get(version)
@@ -193,7 +213,7 @@ def initialize_learning_database(path, backup_dir=None):
                     version += 1
                     connection.execute(f"PRAGMA user_version={version}")
             _check_integrity(connection, path)
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, RuntimeError) as exc:
             raise DatabaseMigrationError(f"Unable to migrate the learning database: {exc}") from exc
         return DatabaseMigrationResult(version, backup_path)
     except sqlite3.Error as exc:

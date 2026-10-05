@@ -43,6 +43,11 @@ class MemoryRecallService:
         terms = [term for term in re.findall(r'\w+', question.casefold())
                  if len(term) >= 3 and term not in _STOP_WORDS]
         found = {}
+        if getattr(self.store, 'semantic_index', None):
+            cancelled = getattr(self.client, 'cancellation_callback', None)
+            options = {'cancelled': cancelled} if callable(cancelled) else {}
+            for hit in self.store.hybrid_search(question, filters=filters, limit=5, **options):
+                found[hit.memory_id] = 2
         for term in terms[:8]:
             for hit in self.store.search(term, filters=filters, limit=5):
                 found[hit.memory_id] = found.get(hit.memory_id, 0) + 1

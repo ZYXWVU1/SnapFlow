@@ -3,8 +3,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import sqlite3
@@ -28,17 +29,20 @@ MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 
 _FIXED_MEMBERS = {
     "config/config.json": "settings",
+    "config/local_models.json": "settings",
+    "config/beta_features.json": "settings",
     "skills/custom_skills.json": "skills",
     "workflows/workflows.json": "workflows",
     "workflows/workflow_history.json": "workflows",
     "integrations/integrations.json": "integrations",
+    "integrations/mcp_connections.json": "integrations",
     "databases/learning.sqlite3": "evaluation",
 }
 _CATEGORY_TARGETS = {
-    "settings": ("config_file",),
+    "settings": ("config_file", "model_records_file", "beta_features_file"),
     "skills": ("custom_skills_file",),
     "workflows": ("workflows_file", "workflow_history_file"),
-    "integrations": ("integrations_file",),
+    "integrations": ("integrations_file", "mcp_connections_file"),
     "evaluation": ("learning_database",),
     "examples": ("verified_images_dir",),
     "memory": ("memory_images_dir",),
@@ -91,10 +95,13 @@ class BackupService:
         items = []
         fixed_sources = (
             ("settings", "config/config.json", self.paths.config_file, "file"),
+            ("settings", "config/local_models.json", self.paths.model_records_file, "file"),
+            ("settings", "config/beta_features.json", self.paths.beta_features_file, "file"),
             ("skills", "skills/custom_skills.json", self.paths.custom_skills_file, "file"),
             ("workflows", "workflows/workflows.json", self.paths.workflows_file, "file"),
             ("workflows", "workflows/workflow_history.json", self.paths.workflow_history_file, "file"),
             ("integrations", "integrations/integrations.json", self.paths.integrations_file, "file"),
+            ("integrations", "integrations/mcp_connections.json", self.paths.mcp_connections_file, "file"),
             ("evaluation", "databases/learning.sqlite3", self.paths.learning_database, "sqlite"),
         )
         for category, member, source, kind in fixed_sources:
@@ -139,6 +146,7 @@ class BackupService:
         protected = [
             self.paths.environment_file,
             self.paths.config_file,
+            self.paths.model_records_file,
             self.paths.custom_skills_file,
             self.paths.workflows_file,
             self.paths.workflow_history_file,
@@ -337,12 +345,42 @@ class BackupService:
     @staticmethod
     def _validate_json_file(member, path):
         try:
+            if member == "config/local_models.json" and Path(path).stat().st_size > 4 * 1024 ** 2:
+                raise ValueError("Local model registry exceeds its size limit.")
             data = json.loads(Path(path).read_text(encoding="utf-8"))
             if member == "config/config.json":
                 from src.config import Config
                 if not isinstance(data, dict):
                     raise ValueError("Settings must be a JSON object.")
                 Config(**data)
+            elif member == "config/local_models.json":
+                _validate_local_model_registry(data)
+            elif member == 'config/beta_features.json':
+                from src.beta.flags import BetaFeatureService
+                if Path(path).stat().st_size > 16384:
+                    raise ValueError('Oversized beta settings.')
+                service = BetaFeatureService(AppPaths(data_dir=Path(path).parent))
+                if service.warning:
+                    raise ValueError(service.warning)
+            elif member == 'integrations/mcp_connections.json':
+                from src.mcp.client.storage import MCPStorage
+                from copy import deepcopy
+                if Path(path).stat().st_size > 2 * 1024 ** 2:
+                    raise ValueError('Oversized MCP metadata.')
+                # Archived metadata must not probe another machine's filesystem.
+                inert = deepcopy(data)
+                if not isinstance(inert, dict) or not isinstance(inert.get('profiles'), list):
+                    raise ValueError('Invalid MCP metadata.')
+                for profile in inert['profiles']:
+                    if not isinstance(profile, dict):
+                        raise ValueError('Invalid MCP profile.')
+                    working = profile.get('working_directory')
+                    if working is not None:
+                        if (not isinstance(working, str) or len(working) > 2048 or '\x00' in working or
+                                not (PureWindowsPath(working).is_absolute() or PurePosixPath(working).is_absolute())):
+                            raise ValueError('Invalid archived MCP working directory.')
+                        profile['working_directory'] = None
+                MCPStorage._validate(inert)
             elif member == "skills/custom_skills.json":
                 from src.skills.custom.models import CustomSkillDefinition
                 if (not isinstance(data, dict) or type(data.get("version")) is not int or
@@ -369,8 +407,8 @@ class BackupService:
                 connections = ConnectionStorage(path)
                 if connections.warning:
                     raise ValueError(connections.warning)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError,
-                ValueError, RecursionError) as exc:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError,
+                ValueError, OverflowError, RecursionError) as exc:
             if isinstance(exc, BackupError):
                 raise
             raise BackupError(f"Backup contains invalid application data in {member}: {exc}") from exc
@@ -388,6 +426,12 @@ class BackupService:
     def _target_for_member(self, member):
         if member == "config/config.json":
             return self.paths.config_file
+        if member == "config/local_models.json":
+            return self.paths.model_records_file
+        if member == 'config/beta_features.json':
+            return self.paths.beta_features_file
+        if member == 'integrations/mcp_connections.json':
+            return self.paths.mcp_connections_file
         if member == "skills/custom_skills.json":
             return self.paths.custom_skills_file
         if member == "workflows/workflows.json":
@@ -513,6 +557,95 @@ class BackupService:
             except OSError:
                 continue
         return total
+
+
+def _validate_local_model_registry(data):
+    """Validate inert registry metadata without managers or filesystem probes.
+
+    Absolute model paths can describe a different machine after restoration.
+    LocalModelManager must still establish ownership before using those paths.
+    """
+    from src.ai.local_models import LocalModel
+    from src.ai.models import ModelCapabilities
+
+    if (not isinstance(data, dict) or set(data) != {"version", "models"} or
+            type(data["version"]) is not int or data["version"] != 1 or
+            not isinstance(data["models"], list)):
+        raise ValueError("Local model registry has an unsupported structure.")
+    ids = set()
+    capability_names = {'text', 'vision', 'embeddings', 'structured_output', 'tool_calling'}
+    for item in data['models']:
+        if not isinstance(item, dict) or not isinstance(item.get('capabilities'), dict):
+            raise ValueError("Local model records and capabilities must be JSON objects.")
+        values = dict(item)
+        capabilities = dict(values.pop('capabilities'))
+        modalities = capabilities.get('modalities', [])
+        if (not isinstance(modalities, list) or any(not isinstance(value, str) or
+                not value.strip() or len(value) > 100 for value in modalities)):
+            raise ValueError("Local model modalities must be a list of names.")
+        capabilities['modalities'] = tuple(modalities)
+        values['capabilities'] = ModelCapabilities(**capabilities)
+        for name in ('verified_capabilities', 'self_tests'):
+            value = values.get(name, [])
+            if not isinstance(value, list):
+                raise ValueError("Local model evidence must be a JSON list.")
+            values[name] = tuple(value)
+        record = LocalModel(**values)
+        if (not isinstance(record.id, str) or not re.fullmatch(r'[0-9a-f]{32}', record.id) or
+                record.id in ids or record.format not in ('gguf', 'onnx')):
+            raise ValueError("Local model registry contains an invalid or duplicate identity.")
+        ids.add(record.id)
+        for name, maximum in (('display_name', 200), ('backend', 100), ('status', 100)):
+            value = getattr(record, name)
+            if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+                raise ValueError("Local model names, backend and status must be valid text.")
+        for name in ('expected_ram_mb', 'expected_vram_mb', 'size_bytes'):
+            value = getattr(record, name)
+            if value is None and name != 'size_bytes':
+                continue
+            if type(value) is not int or value < 0:
+                raise ValueError("Local model sizes must be non-negative integers.")
+        for name in ('quantization', 'source', 'license_name', 'imported_at'):
+            value = getattr(record, name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError("Optional local model metadata must be text.")
+        for name in ('checksum', 'projector_checksum'):
+            value = getattr(record, name)
+            if value is not None and (not isinstance(value, str) or
+                    not re.fullmatch(r'[0-9a-fA-F]{64}', value)):
+                raise ValueError("Local model checksums must be SHA-256 digests.")
+        model_path = _model_metadata_path(record.model_path, record.id, 'model.' + record.format)
+        if record.projector_path is not None:
+            projector_path = _model_metadata_path(record.projector_path, record.id, 'projector.gguf')
+            if projector_path.parent != model_path.parent:
+                raise ValueError("Local model projector path must share its model directory.")
+        if (any(not isinstance(name, str) or name not in capability_names or
+                not getattr(record.capabilities, name) for name in record.verified_capabilities) or
+                len(set(record.verified_capabilities)) != len(record.verified_capabilities)):
+            raise ValueError("Local model verified capabilities are invalid.")
+        if len(record.self_tests) > 20:
+            raise ValueError("Local model self-test evidence exceeds its history limit.")
+        for test in record.self_tests:
+            if (not isinstance(test, dict) or set(test) != {'capability', 'success',
+                    'output_validated', 'latency_ms', 'runtime_id', 'tested_at'} or
+                    not isinstance(test['capability'], str) or test['capability'] not in capability_names or
+                    type(test['success']) is not bool or type(test['output_validated']) is not bool or
+                    type(test['latency_ms']) not in (int, float) or not math.isfinite(test['latency_ms']) or
+                    test['latency_ms'] < 0 or not isinstance(test['runtime_id'], str) or
+                    len(test['runtime_id']) > 100 or not isinstance(test['tested_at'], str)):
+                raise ValueError("Local model self-test evidence is invalid.")
+            timestamp = datetime.fromisoformat(test['tested_at'])
+            if timestamp.tzinfo is None:
+                raise ValueError("Local model self-test timestamp requires a timezone.")
+
+
+def _model_metadata_path(value, model_id, filename):
+    if not isinstance(value, str) or '\0' in value:
+        raise ValueError("Local model path must be valid text.")
+    path = PureWindowsPath(value) if '\\' in value or PureWindowsPath(value).drive else PurePosixPath(value)
+    if not path.is_absolute() or '..' in path.parts or path.name != filename or path.parent.name != model_id:
+        raise ValueError("Local model path does not match the model record.")
+    return path
 
 
 def _safe_member_category(member):

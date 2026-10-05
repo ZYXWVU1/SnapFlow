@@ -39,6 +39,11 @@ class MCPServerService(QObject):
         return len(self.jobs)
 
     def start(self):
+        from src.reliability.policy import get_safety_policy
+        if not get_safety_policy().allows('extension_server'):
+            self.warning = 'Safe Mode keeps the MCP server disabled for this session.'
+            self.changed.emit()
+            return
         if self.policy.snapshot().enabled:
             try:
                 self.ipc.start()

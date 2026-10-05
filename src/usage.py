@@ -56,6 +56,7 @@ class UsageEvent:
     usage_available: bool = True
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    local: bool = False
     estimated_cost_usd: float | None = field(init=False)
 
     def __post_init__(self):
@@ -85,7 +86,9 @@ class UsageEvent:
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "operation", operation)
         object.__setattr__(self, "timestamp", timestamp)
-        object.__setattr__(self, "estimated_cost_usd", estimate_cost(
+        if type(self.local) is not bool:
+            raise ValueError('Local usage state must be true or false.')
+        object.__setattr__(self, "estimated_cost_usd", 0.0 if self.local else estimate_cost(
             provider, model, self.input_tokens, self.output_tokens, self.cached_input_tokens)
             if self.usage_available else None)
 

@@ -3,12 +3,16 @@ from contextlib import asynccontextmanager
 import hashlib
 import os
 
+from src.network_policy import get_network_policy
+
 
 def credential_id(connection_id, purpose='bearer'):
     return 'mcp_' + hashlib.sha256(f'{connection_id}:{purpose}'.encode()).hexdigest()[:40]
 
 
 def make_transport(profile, credentials, *, open_browser=None):
+    get_network_policy().require_allowed('stdio' if profile.transport == 'stdio' else profile.url,
+        'mcp_stdio' if profile.transport == 'stdio' else 'mcp_remote')
     from mcp import StdioServerParameters, stdio_client
     if profile.transport == 'stdio':
         environment = {}
@@ -38,6 +42,7 @@ def make_transport(profile, credentials, *, open_browser=None):
         headers['Authorization'] = 'Bearer ' + token
     @asynccontextmanager
     async def http():
+        get_network_policy().require_allowed(profile.url, 'mcp_remote')
         from contextlib import AsyncExitStack
         async with AsyncExitStack() as stack:
             auth = None

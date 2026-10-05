@@ -13,6 +13,7 @@ from PySide6.QtCore import QByteArray, QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImage
 
 from src.database import initialize_learning_database
+from src.observability.performance import measured
 from src.memory.models import MemoryRecord, MemorySearchResult
 from src.modes import ModeResult
 from src.paths import AppPaths
@@ -287,6 +288,7 @@ class MemoryStore:
             thumbnail.unlink(missing_ok=True)
         return True
 
+    @measured('memory_search', 'memory', event_type='memory_search_completed')
     def search(self, query='', filters=None, limit=20, offset=0):
         filters = filters or {}
         if not isinstance(query, str) or len(query) > 500:
@@ -340,3 +342,9 @@ class MemoryStore:
             (row['description'] or row['searchable_text'])[:220], row['saved_at'],
             row['skill_id'], row['thumbnail_path'],
             -row['rank'] if row['rank'] is not None else None) for row in rows]
+
+    @measured('semantic_search', 'memory')
+    def hybrid_search(self, query='', filters=None, limit=20, offset=0, *, cancelled=None):
+        index = getattr(self, 'semantic_index', None)
+        return index.hybrid_search(query, filters=filters, limit=limit, offset=offset,
+                                   cancelled=cancelled) if index and query.strip() else self.search(query, filters, limit, offset)

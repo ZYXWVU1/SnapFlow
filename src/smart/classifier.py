@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+from src.observability.performance import measured
 
 from .models import ClassificationResult, unknown
 from .prompts import CLASSIFICATION_PROMPT
@@ -32,6 +33,7 @@ class ScreenshotClassifier:
     def __init__(self, llm_client):
         self.llm_client = llm_client
 
+    @measured('skill_classification', 'skill')
     def classify(self, image_bytes: bytes) -> ClassificationResult:
         logger.info('[SMART] Classification started')
         try:

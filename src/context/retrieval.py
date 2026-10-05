@@ -19,9 +19,10 @@ def _field_text(value):
 
 
 class ContextRetrievalService:
-    def __init__(self, store, permissions, *, limit=8):
+    def __init__(self, store, permissions, *, limit=8, cancelled=None):
         self.store = store
         self.permissions = permissions
+        self.cancelled = cancelled if callable(cancelled) else None
         self.limit = min(max(int(limit), 1), 8)
 
     def retrieve(self, session, request, *, filters=None):
@@ -37,6 +38,11 @@ class ContextRetrievalService:
             _field_text(_safe_fields(request.current_skill_result)).casefold())
             if len(term) >= 3 and term not in _STOP and term not in terms]
         found = {}
+        if getattr(self.store, 'semantic_index', None):
+            options = {'cancelled': self.cancelled} if self.cancelled else {}
+            for hit in self.store.hybrid_search(request.user_question, filters=filters, limit=self.limit, **options):
+                if hit.memory_id not in session.excluded_memory_ids:
+                    found[hit.memory_id] = 2
         if request.conversation_enabled and _FOLLOWUP.search(request.user_question):
             for turn in session.history[-2:]:
                 for _, memory_id, revision in turn.source_bindings:

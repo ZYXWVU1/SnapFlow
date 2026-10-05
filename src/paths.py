@@ -21,6 +21,8 @@ class AppPaths:
         bundled_root = getattr(sys, "_MEIPASS", SOURCE_ROOT)
         self._resource_root = Path(resource_root or bundled_root).expanduser()
         self._data_dir = Path(data_dir).expanduser() if data_dir is not None else self._default_data_dir()
+        self._local_data_dir = (self._data_dir if data_dir is not None
+                                else self._default_local_data_dir())
         self._legacy_data_dir = (Path(legacy_data_dir).expanduser() if legacy_data_dir is not None
                                  else self._default_legacy_data_dir())
 
@@ -37,6 +39,16 @@ class AppPaths:
     @classmethod
     def _default_data_dir(cls):
         return cls._roaming_root() / APP_NAME
+
+    @classmethod
+    def _default_local_data_dir(cls):
+        """Large local AI assets use non-roaming user storage on Windows."""
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_appdata:
+            return Path(local_appdata).expanduser() / APP_NAME
+        if os.name == "nt":
+            return Path.home() / "AppData" / "Local" / APP_NAME
+        return cls._default_data_dir()
 
     @classmethod
     def _default_legacy_data_dir(cls):
@@ -78,6 +90,21 @@ class AppPaths:
         return self.data_dir / "backups"
 
     @property
+    def models_dir(self):
+        """Imported weights, separate from resources and ordinary backups."""
+        return self._local_data_dir / "models"
+
+    @property
+    def runtimes_dir(self):
+        """Optional separately installed runtime binaries; never auto-created."""
+        return self._local_data_dir / "runtimes"
+
+    @property
+    def model_records_file(self):
+        """Small model manifest; it contains no weights or inference payloads."""
+        return self.data_dir / "local_models.json"
+
+    @property
     def config_file(self):
         return self.config_dir / "config.json"
 
@@ -107,8 +134,25 @@ class AppPaths:
         return self.data_dir / "integrations.json"
 
     @property
+    def mcp_connections_file(self):
+        return self.data_dir / 'mcp_connections.json'
+
+    @property
+    def beta_features_file(self):
+        return self.data_dir / 'beta_features.json'
+
+    @property
     def learning_database(self):
         return self.data_dir / "learning.sqlite3"
+
+    @property
+    def observability_database(self):
+        """Bounded operational metadata, separate from user content and backups."""
+        return self._local_data_dir / "observability.sqlite3"
+
+    @property
+    def recovery_database(self):
+        return self.data_dir / 'recovery.sqlite3'
 
     @property
     def verified_images_dir(self):

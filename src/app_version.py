@@ -5,7 +5,7 @@ import re
 
 
 APP_NAME = "SnapFlow"
-APP_VERSION = "0.8.0-beta.1"
+APP_VERSION = "0.8.0-beta.2"
 RELEASE_CHANNEL = "beta"
 
 

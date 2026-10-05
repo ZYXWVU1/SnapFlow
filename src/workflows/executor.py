@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import uuid
+from src.observability.performance import measured
 from src.skill_actions import ACTIONS, ActionResult
 from .conditions import evaluate_conditions
 from .models import WorkflowExecutionResult, WorkflowStepResult
@@ -18,6 +19,7 @@ class WorkflowExecutor:
         self.actions = ACTIONS if actions is None else actions
         self.execute_action = execute_action
 
+    @measured('workflow_execution', 'workflow', event_type='workflow_completed')
     def execute(self, workflow, context, *, cancel=None, preview=False):
         workflow = deepcopy(workflow)
         result = WorkflowExecutionResult(workflow.id, 'running', now(),

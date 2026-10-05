@@ -22,8 +22,18 @@ from .worker import EvaluationWorker
 from .improvements import ProposalWorker, CandidateEvaluationWorker, ImprovementDialog
 
 
+class _CancellableEvaluationRunner:
+    def __init__(self, runner, cancelled):
+        self.runner, self.cancelled = runner, cancelled
+
+    def evaluate(self, *args, **options):
+        return self.runner.evaluate(*args, **options, cancelled=self.cancelled)
+
+
 class EvaluationPage(QScrollArea):
     open_skills_requested = Signal()
+    comparison_requested = Signal()
+    comparison_completed = Signal(object)
 
     def __init__(self, skills_storage, workflows_storage, client=None, learning_path=None):
         super().__init__()
@@ -34,6 +44,9 @@ class EvaluationPage(QScrollArea):
         self.usage_storage = None
         self.max_evaluation_cases = 100
         self.worker = None
+        self._comparison_running = False
+        self._ai_work_stopped = False
+        self.comparison_dialog = None
         self.dialogs = []
         self.setWidgetResizable(True)
         body = QWidget()
@@ -61,6 +74,10 @@ class EvaluationPage(QScrollArea):
         self.run_button.clicked.connect(self.run_evaluation)
         row.addWidget(self.run_button)
         overview.content.addLayout(row)
+        self.compare_button = AppButton('Compare AI Models')
+        self.compare_button.clicked.connect(self.comparison_requested)
+        self.comparison_requested.connect(self.compare_models)
+        overview.content.addWidget(self.compare_button)
         layout.addWidget(overview)
         datasets_card = Card()
         datasets_card.content.addWidget(QLabel('Datasets'))
@@ -115,7 +132,25 @@ class EvaluationPage(QScrollArea):
             self.versions = SkillVersionManager(self.skills_storage, self.workflows_storage, self.learning_path)
             self.reports = EvaluationStorage(self.feedback, self.learning_path)
             self.optimizer = SkillOptimizer(self.feedback, self.datasets, self.versions,
-                                            self.client, self.learning_path, self.reports)
+                                            self._request_client(), self.learning_path, self.reports)
+
+    def _work_cancelled(self):
+        return self._ai_work_stopped
+
+    def _request_client(self):
+        return self.client.scoped(self._work_cancelled) if hasattr(self.client, 'scoped') else self.client
+
+    def _evaluation_runner(self):
+        return _CancellableEvaluationRunner(EvaluationRunner(self.feedback, self.datasets, self.versions,
+            self.reports, self._request_client()), self._work_cancelled)
+
+    def stop_ai_work(self):
+        """Stop new dispatches; retain running workers until their queued finish."""
+        self._ai_work_stopped = True
+        if self.comparison_dialog is not None:
+            self.comparison_dialog.cancel_work()
+        for button in (self.run_button, self.generate_button, self.compare_button):
+            button.setEnabled(False)
 
     def refresh(self):
         try:
@@ -140,6 +175,7 @@ class EvaluationPage(QScrollArea):
         for entry in datasets:
             count = len(self.datasets.available_examples(entry))
             self.dataset_list.addItem(f'{entry.name} · {entry.skill_id} · {entry.dataset_type} · {count} available cases')
+            self.dataset_list.item(self.dataset_list.count() - 1).setData(Qt.ItemDataRole.UserRole, entry.id)
         self.dataset_empty.setVisible(not datasets)
         self.dataset_list.setVisible(bool(datasets))
         self.run_list.clear()
@@ -186,7 +222,7 @@ class EvaluationPage(QScrollArea):
             QMessageBox.warning(self, 'Dataset unavailable', str(exc))
 
     def run_evaluation(self):
-        if self.worker is not None:
+        if self._ai_work_stopped or self.worker is not None or self._comparison_running:
             return
         try:
             self._services()
@@ -197,13 +233,14 @@ class EvaluationPage(QScrollArea):
             self.dialogs.append(dialog)
             if not dialog.exec():
                 return
-            runner = EvaluationRunner(self.feedback, self.datasets, self.versions, self.reports, self.client)
+            runner = self._evaluation_runner()
             self.worker = EvaluationWorker(runner, dialog.version.currentData(),
                 dialog.dataset.currentData(), dialog.model.text().strip(),
                 max_cases=dialog.case_limit.value())
             self.worker.signals.finished.connect(self.evaluation_finished)
             self.run_button.setEnabled(False)
             self.generate_button.setEnabled(False)
+            self.compare_button.setEnabled(False)
             self.status.setText('Evaluating screenshots in the background…')
             QThreadPool.globalInstance().start(self.worker)
         except (OSError, ValueError, sqlite3.Error) as exc:
@@ -211,8 +248,12 @@ class EvaluationPage(QScrollArea):
 
     def evaluation_finished(self, report, error):
         self.worker = None
+        if self._ai_work_stopped:
+            self.status.setText('AI evaluation cancelled.')
+            return
         self.run_button.setEnabled(True)
         self.generate_button.setEnabled(True)
+        self.compare_button.setEnabled(True)
         if error:
             self.status.setText(error)
             return
@@ -230,7 +271,7 @@ class EvaluationPage(QScrollArea):
             dialog.show()
 
     def generate_proposal(self):
-        if self.worker is not None:
+        if self._ai_work_stopped or self.worker is not None or self._comparison_running:
             return
         try:
             self._services()
@@ -248,10 +289,12 @@ class EvaluationPage(QScrollArea):
                            if v.status == 'published'), None)
             if source is None:
                 raise ValueError('Publish a custom Skill version first.')
+            self.optimizer.client = self._request_client()
             self.worker = ProposalWorker(self.optimizer, source.version_id, dataset.id)
             self.worker.signals.finished.connect(self.proposal_finished)
             self.generate_button.setEnabled(False)
             self.run_button.setEnabled(False)
+            self.compare_button.setEnabled(False)
             self.status.setText('Analyzing verified development feedback in the background…')
             QThreadPool.globalInstance().start(self.worker)
         except (OSError, ValueError, sqlite3.Error) as exc:
@@ -259,8 +302,12 @@ class EvaluationPage(QScrollArea):
 
     def proposal_finished(self, proposal, error):
         self.worker = None
+        if self._ai_work_stopped:
+            self.status.setText('AI evaluation cancelled.')
+            return
         self.generate_button.setEnabled(True)
         self.run_button.setEnabled(True)
+        self.compare_button.setEnabled(True)
         if error:
             self.status.setText(error)
             return
@@ -280,7 +327,7 @@ class EvaluationPage(QScrollArea):
             dialog.show()
 
     def evaluate_candidate(self, candidate_id):
-        if self.worker is not None:
+        if self._ai_work_stopped or self.worker is not None or self._comparison_running:
             return
         candidate = self.optimizer.get(candidate_id)
         if candidate is None:
@@ -317,19 +364,24 @@ class EvaluationPage(QScrollArea):
         confirmation.setDefaultButton(QMessageBox.StandardButton.No)
         if confirmation.exec() != QMessageBox.StandardButton.Yes:
             return
-        runner = EvaluationRunner(self.feedback, self.datasets, self.versions, self.reports, self.client)
+        runner = self._evaluation_runner()
         self.worker = CandidateEvaluationWorker(self.optimizer, runner, candidate,
             selected_dataset.id, model.strip(), max_cases=case_count)
         self.worker.signals.finished.connect(self.candidate_finished)
         self.run_button.setEnabled(False)
         self.generate_button.setEnabled(False)
+        self.compare_button.setEnabled(False)
         self.status.setText('Evaluating current and candidate versions in the background…')
         QThreadPool.globalInstance().start(self.worker)
 
     def candidate_finished(self, candidate, error):
         self.worker = None
+        if self._ai_work_stopped:
+            self.status.setText('AI evaluation cancelled.')
+            return
         self.run_button.setEnabled(True)
         self.generate_button.setEnabled(True)
+        self.compare_button.setEnabled(True)
         if error:
             self.status.setText(error)
             return
@@ -337,3 +389,41 @@ class EvaluationPage(QScrollArea):
         for dialog in self.dialogs:
             if isinstance(dialog, ImprovementDialog) and dialog.candidate.id == candidate.id:
                 dialog.refresh()
+
+    def compare_models(self):
+        if self._ai_work_stopped or self.worker is not None or self._comparison_running:
+            return
+        if self.comparison_dialog is not None and self.comparison_dialog.isVisible():
+            self.comparison_dialog.raise_()
+            self.comparison_dialog.activateWindow()
+            return
+        try:
+            self._services()
+            if self.client is None:
+                raise ValueError('AI client is unavailable.')
+            from src.ui.evaluation.runtime_comparison import ModelComparisonDialog
+            from src.config import Config
+            selected = self.dataset_list.currentItem()
+            dialog = ModelComparisonDialog(self.datasets, self.versions, self.feedback, self.reports,
+                getattr(self.client, 'config', None) or Config(), self, client=self.client,
+                usage_storage=self.usage_storage, max_cases=self.max_evaluation_cases,
+                initial_dataset_id=selected.data(Qt.ItemDataRole.UserRole) if selected else None,
+                cancelled=self._work_cancelled)
+            dialog.running_changed.connect(self._comparison_state_changed)
+            dialog.completed.connect(self._comparison_finished)
+            self.comparison_dialog = dialog
+            self.dialogs.append(dialog)
+            dialog.show()
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            self.status.setText('Model comparison unavailable: ' + str(exc))
+
+    def _comparison_state_changed(self, running):
+        self._comparison_running = running
+        for button in (self.run_button, self.generate_button, self.compare_button):
+            button.setEnabled(not self._ai_work_stopped and not running and self.worker is None)
+
+    def _comparison_finished(self, result):
+        if self._ai_work_stopped:
+            return
+        self.refresh()
+        self.comparison_completed.emit(result)

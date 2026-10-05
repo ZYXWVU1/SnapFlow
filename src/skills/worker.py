@@ -2,6 +2,8 @@
 from PySide6.QtCore import QObject, QRunnable, Signal
 from src.llm_client import AnalysisError
 from src.modes import ResponseFormatError
+import time
+from src.observability.performance import emit
 
 
 class SkillSignals(QObject):
@@ -15,8 +17,11 @@ class SkillExtractionWorker(QRunnable):
         self.request_id, self.client, self.data = request_id, client, data
         self.skill, self.confidence = skill, confidence
         self.question = ''
+        self.queued_at = time.perf_counter()
 
     def run(self):
+        emit('operation_completed', component='skill', duration_ms=(time.perf_counter() - self.queued_at) * 1000,
+             success=True, properties={'operation': 'queue_wait'})
         try:
             result, error = self.skill.extract(self.client, self.data, self.confidence), False
         except (AnalysisError, ResponseFormatError) as exc:

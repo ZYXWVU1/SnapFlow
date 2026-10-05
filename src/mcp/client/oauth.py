@@ -8,6 +8,7 @@ import secrets
 import time
 from urllib.parse import parse_qs, urlsplit
 from .transports import credential_id
+from src.network_policy import get_network_policy, require_http_request
 
 
 def browser_url(value):
@@ -22,6 +23,7 @@ def browser_url(value):
 
 async def enforce_http_request(request):
     browser_url(str(request.url))
+    require_http_request(request, 'mcp_remote')
     request.headers['Accept-Encoding'] = 'identity'
 
 
@@ -91,6 +93,7 @@ def oauth_provider(profile, credentials, callback, open_browser):
             raise PermissionError('OAuth issuer metadata unavailable. Reauthorize this connection.')
     async def redirect(url):
         browser_url(url)
+        get_network_policy().require_allowed(url, 'oauth')
         params = parse_qs(urlsplit(url).query, keep_blank_values=True)
         if len(params.get('state', [])) != 1:
             raise ValueError('OAuth authorization state is missing.')

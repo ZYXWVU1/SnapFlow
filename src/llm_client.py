@@ -3,6 +3,8 @@ import base64
 import logging
 import os
 import time
+import threading
+import httpx
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
@@ -46,8 +48,177 @@ def _request_timeout(base_url: str) -> float:
 
 
 class LLMClient:
-    def __init__(self, usage_callback=None, *, on_usage=None):
+    def __init__(self, usage_callback=None, *, on_usage=None, config=None, policy=None,
+                 runtime_choice=None, routing_callback=None, performance_store=None, paths=None):
         self.usage_callback = usage_callback or on_usage
+        from src.config import Config
+        from src.network_policy import get_network_policy
+        self.config = config or Config()
+        self.policy = policy or get_network_policy()
+        self.runtime_choice = runtime_choice
+        self.routing_callback = routing_callback
+        self.performance_store = performance_store
+        from src.paths import AppPaths
+        self.paths = paths or AppPaths()
+        self.last_response = None
+        self.last_decision = None
+        self._local_runtime = None
+        self.managed_runtime = None
+        self.fallback_callback = None
+        self._request_scope = threading.local()
+
+    def scoped(self, cancelled):
+        client = self
+        class ScopedClient:
+            @property
+            def cancellation_callback(self):
+                return cancelled
+
+            def __setattr__(self, name, value):
+                setattr(client, name, value)
+
+            def __getattr__(self, name):
+                value = getattr(client, name)
+                if name not in ('request_text', 'request_image', 'request_validated_image', 'analyze_image', 'test_connection'):
+                    return value
+                def call(*args, **kwargs):
+                    previous = getattr(client._request_scope, 'cancelled', None)
+                    client._request_scope.cancelled = cancelled
+                    try:
+                        return value(*args, **kwargs)
+                    finally:
+                        client._request_scope.cancelled = previous
+                return call
+        return ScopedClient()
+
+    def configure(self, config):
+        self.config = config
+        self._local_runtime = None
+
+    def routing_metadata(self, skill):
+        definition = getattr(skill, 'definition', None)
+        return {'skill_id': skill.id, 'definition_snapshot': definition.to_dict() if definition else None}
+
+    def _execute(self, request, cloud_executor, *, cloud_model=None, cloud_endpoint=None, validator=None):
+        from src.ai.cloud import CloudRuntime
+        from src.ai.local import LocalOpenAICompatibleRuntime
+        from src.ai.models import ModelCapabilities
+        from src.ai.router import AIRuntimeRouter
+        from dataclasses import replace
+        cloud_model = cloud_model or self.config.ai_model or os.getenv('AI_MODEL') or DEFAULT_AI_MODEL
+        cloud_endpoint = cloud_endpoint or self.config.ai_base_url or os.getenv('AI_BASE_URL') or DEFAULT_AI_BASE_URL
+        runtimes = [CloudRuntime(cloud_model, cloud_executor, cloud_endpoint, self.policy)]
+        config = self.config
+        from src.ai.routing_context import collect_resources, RoutingContextResolver
+        resources = collect_resources() if config.local_ai_model else {}
+        data = {**request.metadata, **resources, 'cloud_base_url': cloud_endpoint}
+        if data.get('definition_snapshot') and self.performance_store:
+            evidence = RoutingContextResolver(self.paths, self.performance_store).resolve(
+                data['skill_id'], data['definition_snapshot'], local_model_id=config.local_ai_model,
+                cloud_model_id=cloud_model, local_model_version=config.local_ai_model_version,
+                cloud_model_version=config.ai_model_version, hardware_profile_id=data.get('hardware_profile_id'))
+            data.update(evidence)
+        data.pop('definition_snapshot', None)
+        request = replace(request, metadata=data)
+        if config.local_ai_model:
+            if self._local_runtime is None:
+                caps = ModelCapabilities(text=True, vision=config.local_ai_vision,
+                    structured_output=config.local_ai_structured_output,
+                    max_context_length=config.local_ai_context_length)
+                self._local_runtime = LocalOpenAICompatibleRuntime(config.local_ai_endpoint,
+                    config.local_ai_model, caps, self.policy, api_key=self.managed_runtime.api_key
+                    if self.managed_runtime and self.managed_runtime.endpoint == config.local_ai_endpoint.rstrip('/') else None,
+                    manager=self.managed_runtime if self.managed_runtime and self.managed_runtime.endpoint == config.local_ai_endpoint.rstrip('/') else None)
+            runtimes.append(self._local_runtime)
+            try:
+                from src.ai.local_models import LocalModelManager, ModelManagementError
+                record = LocalModelManager(self.paths).get_model(config.local_ai_model)
+                self._local_runtime.expected_ram_mb = record.expected_ram_mb
+            except (ValueError, OSError, ModelManagementError):
+                self._local_runtime.expected_ram_mb = None
+        if config.ai_execution_mode == 'ask_every_time' and not (config.private_mode or self.policy.private_mode):
+            choice = request.metadata.get('runtime_choice') or (self.runtime_choice(request) if self.runtime_choice else None)
+            request = replace(request, metadata={**request.metadata, 'runtime_choice': choice})
+        router = AIRuntimeRouter(runtimes, config, self.policy,
+            performance_store=self.performance_store, fallback_callback=self.fallback_callback,
+            config_provider=lambda: self.config)
+        try:
+            response = router.execute(request, validator)
+            if self.config is not config:
+                raise AnalysisError('AI settings changed during this request. Retry using the current policy.')
+            decision = router.last_decision
+            self.last_response, self.last_decision = response, decision
+            if response.local and self.usage_callback:
+                from src.usage import UsageEvent
+                counts = response.usage or {}
+                self.usage_callback(UsageEvent(config.local_ai_endpoint, response.model_id,
+                    request.metadata.get('operation', 'local_ai'), counts.get('input_tokens', 0),
+                    counts.get('output_tokens', 0), latency_ms=round(response.latency_ms),
+                    usage_available=response.usage is not None, local=True))
+            if self.routing_callback:
+                self.routing_callback(response, decision)
+            return response.content
+        except AnalysisError:
+            raise
+        except ValueError as exc:
+            from src.modes import ResponseFormatError
+            if isinstance(exc, ResponseFormatError):
+                raise
+            raise AnalysisError(str(exc)) from None
+
+    def request_validated_image(self, image_bytes, prompt, validator, *, mode='skill', **kwargs):
+        return self.request_image(image_bytes, prompt, mode=mode, validator=validator, **kwargs)
+
+    def _cloud_http(self, transport=None, cancelled=None):
+        def guard(request):
+            if cancelled and cancelled():
+                raise AnalysisError('AI request cancelled.')
+            if self.config.private_mode or self.config.ai_execution_mode == 'local_only':
+                raise AnalysisError('The current policy blocks cloud AI.')
+            self.policy.require_allowed(str(request.url), 'cloud_ai')
+        return httpx.Client(transport=transport, follow_redirects=False,
+                            event_hooks={'request': [guard]})
+
+    def request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
+                     base_url=None, model=None, usage_operation=None,
+                     system_prompt=None, privacy_requirement='standard', validator=None,
+                     runtime_choice=None, metadata=None, cancelled=None) -> str:
+        from src.ai.models import AIRequest
+        from src.observability.performance import emit
+        prepared = time.perf_counter()
+        request = AIRequest(prompt=prompt, task_type='contextual_reasoning' if mode == 'context' else 'text',
+            cancelled=cancelled or getattr(self._request_scope, 'cancelled', None),
+            preferred_model=model, privacy_requirement=privacy_requirement,
+            metadata={**(metadata or {}), **dict(mode=mode, system_prompt=system_prompt, operation=usage_operation or 'text',
+                          max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192), runtime_choice=runtime_choice)})
+        emit('operation_completed', component='ai_router', duration_ms=(time.perf_counter() - prepared) * 1000,
+             success=True, properties={'operation': 'request_prepare'})
+        return self._execute(request, lambda req: self._cloud_request_text(req.prompt, mode,
+            api_key=api_key, base_url=req.metadata['cloud_base_url'], model=req.preferred_model, usage_operation=usage_operation,
+            system_prompt=system_prompt, cancelled=req.cancelled), cloud_model=model, cloud_endpoint=base_url, validator=validator)
+
+    def request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
+                      custom_prompt=None, history=None, model_override=None, usage_operation=None,
+                      *, response_schema=None, validator=None, privacy_requirement='standard',
+                      runtime_choice=None, metadata=None, cancelled=None) -> str:
+        from src.ai.models import AIRequest
+        from src.observability.performance import emit
+        prepared = time.perf_counter()
+        if not image_bytes:
+            raise AnalysisError('The screenshot is empty. Please capture again.')
+        request = AIRequest(prompt=prompt, task_type='structured_extraction' if mode in ('skill', 'extract', 'debug') else 'vision',
+            cancelled=cancelled or getattr(self._request_scope, 'cancelled', None),
+            image_bytes=image_bytes, conversation=history or (), response_schema=response_schema,
+            preferred_model=model_override, privacy_requirement=privacy_requirement,
+            metadata={**(metadata or {}), **dict(mode=mode, custom_prompt=custom_prompt, operation=usage_operation or mode or 'image',
+                          max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192), runtime_choice=runtime_choice,
+                          cloud_max_image_width=self.config.max_image_width)})
+        emit('operation_completed', component='ai_router', duration_ms=(time.perf_counter() - prepared) * 1000,
+             success=True, properties={'operation': 'request_prepare'})
+        return self._execute(request, lambda req: self._cloud_request_image(req.image_bytes, req.prompt, mode,
+            custom_prompt, history, req.preferred_model, usage_operation, cancelled=req.cancelled,
+            base_url=req.metadata['cloud_base_url'],
+            image_encoding=req.metadata.get('image_encoding', 'png')), cloud_model=model_override, validator=validator)
 
     def _record_usage(self, response, *, model, base_url, operation, started=None, failure=None):
         if self.usage_callback is None:
@@ -85,9 +256,9 @@ class LLMClient:
         except Exception:
             logging.getLogger(__name__).warning('Unable to record provider token usage.')
 
-    def request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
+    def _cloud_request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
                      base_url=None, model=None, usage_operation=None,
-                     system_prompt=None) -> str:
+                     system_prompt=None, cancelled=None) -> str:
         """Use the configured provider for an explicit text-only Skill proposal."""
         key = (os.getenv('AI_API_KEY', '') if api_key is None else api_key).strip()
         if not key:
@@ -104,7 +275,8 @@ class LLMClient:
         messages.append({'role': 'user', 'content': prompt})
         try:
             with OpenAI(api_key=key, base_url=base_url,
-                        timeout=_request_timeout(base_url), max_retries=0) as client:
+                        timeout=_request_timeout(base_url), max_retries=0,
+                        http_client=self._cloud_http(cancelled=cancelled)) as client:
                 response = client.chat.completions.create(model=model,
                     messages=messages,
                     max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192))
@@ -148,13 +320,15 @@ class LLMClient:
     def analyze_image(self, image_bytes: bytes, mode: str = "ask", custom_prompt: str | None = None,
                       history: list[dict[str, str]] | None = None) -> str:
         prompt = get_prompt(mode)
-        return self.request_image(image_bytes, prompt, mode, custom_prompt, history)
+        from src.modes import parse_result
+        validator = (lambda text: parse_result(mode, text)) if mode in ('debug', 'extract') else None
+        return self.request_image(image_bytes, prompt, mode, custom_prompt, history, validator=validator)
 
-    def request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
+    def _cloud_request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
                       custom_prompt: str | None = None,
                       history: list[dict[str, str]] | None = None,
                       model_override: str | None = None,
-                      usage_operation: str | None = None) -> str:
+                      usage_operation: str | None = None, *, cancelled=None, image_encoding='png', base_url=None) -> str:
         """Shared vision transport for workflow and standalone classification prompts."""
         key = os.getenv("AI_API_KEY", "").strip()
         if not key:
@@ -163,14 +337,14 @@ class LLMClient:
             raise AnalysisError("The screenshot is empty. Please capture again.")
         if custom_prompt and custom_prompt.strip() and not history:
             prompt += "\n\nAdditional question about this image:\n" + custom_prompt.strip()
-        base_url = os.getenv("AI_BASE_URL") or DEFAULT_AI_BASE_URL
+        base_url = base_url or os.getenv("AI_BASE_URL") or DEFAULT_AI_BASE_URL
         model = model_override.strip() if isinstance(model_override, str) else ""
         model = model or os.getenv("AI_MODEL") or DEFAULT_AI_MODEL
         if len(model) > 128:
             raise AnalysisError("The configured AI model identifier is too long.")
         is_siliconflow = "siliconflow.cn" in base_url.lower()
         image_url = {
-            "url": "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii"),
+            "url": "data:image/" + image_encoding + ";base64," + base64.b64encode(image_bytes).decode("ascii"),
         }
         # SiliconFlow documents image-first content and supports detail=low/high/auto.
         # Low detail is a safer default for screenshots and reduces visual token use.
@@ -187,7 +361,8 @@ class LLMClient:
         started = time.perf_counter()
         try:
             with OpenAI(api_key=key, base_url=base_url,
-                        timeout=_request_timeout(base_url), max_retries=0) as client:
+                        timeout=_request_timeout(base_url), max_retries=0,
+                        http_client=self._cloud_http(cancelled=cancelled)) as client:
                 request = {
                     "model": model,
                     "messages": messages,

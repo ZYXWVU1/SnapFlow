@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QMessageBox, QScrollArea, QSpinBox, QVBoxLayout, QWidget
@@ -117,6 +118,22 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
         context_note.setProperty('role', 'muted')
         context.content.addWidget(context_note)
         body.addWidget(context)
+        diagnostics = Card()
+        diagnostics.content.addWidget(QLabel('Privacy & Diagnostics'))
+        self.local_observability_enabled = QCheckBox('Keep local reliability records')
+        self.local_observability_enabled.setAccessibleName('Keep local reliability records')
+        self.local_observability_enabled.setChecked(config.local_observability_enabled)
+        diagnostics.content.addWidget(self.local_observability_enabled)
+        self.local_crash_reports_enabled = QCheckBox('Keep safe local error records')
+        self.local_crash_reports_enabled.setChecked(config.local_crash_reports_enabled)
+        diagnostics.content.addWidget(self.local_crash_reports_enabled)
+        reliability_note = QLabel(
+            'Records contain safe operation status and session metadata only. They stay on this '
+            'computer and exclude screenshots, prompts, Memory content and credentials. '
+            'Turning this off also turns off abnormal-session detection.')
+        reliability_note.setWordWrap(True)
+        diagnostics.content.addWidget(reliability_note)
+        body.addWidget(diagnostics)
         usage = Card()
         usage.content.addWidget(QLabel('Usage & Costs'))
         usage_form = QFormLayout()
@@ -149,6 +166,14 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
         self.automatic_updates = QCheckBox('Check for updates when SnapFlow starts')
         self.automatic_updates.setChecked(config.automatic_update_checks)
         about.content.addWidget(self.automatic_updates)
+        self.update_channel = QComboBox()
+        self.update_channel.addItem('Stable releases', 'stable')
+        self.update_channel.addItem('Beta and stable releases', 'beta')
+        if config.update_channel == 'dev':
+            self.update_channel.addItem('Development releases (explicit local setting)', 'dev')
+        self.update_channel.setCurrentIndex(self.update_channel.findData(config.update_channel))
+        self.update_channel.setAccessibleName('Update release channel')
+        about.content.addWidget(self.update_channel)
         update_note = QLabel(
             'An update check contacts the configured GitHub Releases API and sends no screenshots or account data. '
             'It shows release notes and opens the official release page; SnapFlow never downloads or installs updates automatically.')
@@ -164,7 +189,7 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
 
     def submit(self) -> None:
         try:
-            config = Config(
+            config = replace(self.config,
                 hotkey=self.hotkey.text().strip().lower(),
                 default_mode=self.mode.currentData(),
                 max_image_width=self.width.value(),
@@ -175,6 +200,7 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
                 monthly_cost_warning_usd=self.cost_warning.value(),
                 max_evaluation_cases=self.max_evaluation_cases.value(),
                 automatic_update_checks=self.automatic_updates.isChecked(),
+                update_channel=self.update_channel.currentData(),
                 ai_base_url=self.ai_base_url.text().strip(),
                 ai_model=self.ai_model.text().strip(),
                 visual_memory_enabled=self.visual_memory_enabled.isChecked(),
@@ -182,7 +208,9 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
                 semantic_search_enabled=self.config.semantic_search_enabled,
                 ai_memory_questions=self.ai_memory_questions.isChecked(),
                 contextual_assistant_enabled=self.contextual_assistant_enabled.isChecked(),
-                context_memory_search_enabled=self.context_memory_search_enabled.isChecked())
+                context_memory_search_enabled=self.context_memory_search_enabled.isChecked(),
+                local_observability_enabled=self.local_observability_enabled.isChecked(),
+                local_crash_reports_enabled=self.local_crash_reports_enabled.isChecked())
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid settings", str(exc))
             return

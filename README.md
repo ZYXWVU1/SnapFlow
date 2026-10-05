@@ -1,5 +1,9 @@
 # SnapFlow
 
+Phase 13 adds local reliability records, crash recovery and Safe Mode, performance timings, local beta features, feedback exports, Health Center, and release gates. The Windows candidate is `0.8.0-beta.2`; actual qualification and remaining blockers are recorded in [the Phase 13 report](docs/PHASE13_IMPLEMENTATION.md).
+
+Start with [the beta testing guide](docs/BETA_TESTING_GUIDE.md), [privacy and local analytics](docs/PRIVACY_ANALYTICS.md), [recovery guidance](docs/CRASH_RECOVERY.md), [known issues](docs/BETA_KNOWN_ISSUES.md), and [the release process](docs/RELEASE_PROCESS.md). Remote analytics are not implemented. Genuine local model inference and live providers require separate qualification; synthetic checks are identified in the report.
+
 SnapFlow is a Windows desktop app for turning a selected part of your screen into an AI answer or structured information. Review the result, then choose whether to copy it, save it, or use it in a workflow.
 
 Capture and provider requests start with a user action. Workflow actions that write to connected services require confirmation.
@@ -16,6 +20,8 @@ Capture and provider requests start with a user action. Workflow actions that wr
 - **Build Visual Memory:** Choose **Save to Memory** on a structured Skill or Extract result, then search saved information locally from the Memory page. AI Memory Questions are an optional setting and send only retrieved saved text to your provider.
 - **Ask with Context:** After reviewing a screenshot result, ask a follow-up using the current analysis, memories you select, or a separately enabled session-scoped Memory search. Source buttons open the saved records used in the answer.
 - **Check usage and updates:** View token usage and estimated costs when model rates are known. Optional update checks show release information; they do not download or install updates.
+- **Choose where AI runs:** Keep the existing cloud provider, configure a loopback local server, or explicitly start an optional managed GGUF runtime. Private Mode blocks application-owned external traffic; Local Only restricts inference.
+- **Compare models and search Memory locally:** Explicitly compare local/cloud models on a saved dataset, or configure local text embeddings for background Memory indexing and semantic search with keyword fallback.
 
 ## Get started
 
@@ -58,7 +64,21 @@ notepad .env
 
 The default endpoint is OpenAI, with `gpt-4.1-mini` as the default model. Other OpenAI-compatible providers must support image input. An `AI_API_KEY` environment value takes precedence over a saved key. Provider and model choices saved in Settings take precedence over `AI_BASE_URL` and `AI_MODEL` from `.env`.
 
-Each request sends the selected image to the configured provider and may incur a charge. Testing a connection sends a short text request and may also incur a charge.
+In Cloud Only, requests send selected content to the configured provider and may incur a charge. Testing the cloud connection sends a short text request and may also incur a charge. Existing installations keep Cloud Only; cloud fallback is off by default.
+
+## Local AI and Private Mode
+
+Open **Settings → AI & Models**. Enter a running OpenAI-compatible loopback endpoint, its model ID, and the actual capabilities/context length. Use **Check Runtime**, **List Server Models**, **Test Text**, **Test Vision**, and **Test JSON** explicitly. Local execution needs no cloud API key; screenshot analysis requires a working Vision model.
+
+Choose **Local Only**, **Prefer Local**, **Automatic**, **Cloud Only**, or **Ask Every Time**, then save. Prefer Local and Automatic can use cloud only when fallback is enabled and privacy permits it. Private Mode overrides those choices and blocks application-owned external AI, remote integrations/MCP/OAuth and outbound checks. Local Only limits inference while other authorized integrations can still use the network. Loopback servers and approved stdio executables retain their own networking behavior; Private Mode is not a firewall for third-party programs.
+
+The optional **Import GGUF** / **Start Selected Model** flow needs separately obtained weights, an existing compatible `llama-server.exe`, and a matching projector for Vision. Managed startup uses loopback authentication, offline flags and CPU execution. No model catalog, download, runtime distribution, preload or GPU installation occurs automatically. The backend can import inert standalone ONNX data; the UI and managed inference support GGUF. Detected GPU/NPU information does not establish acceleration support.
+
+**Evaluation → Compare AI Models** runs only after confirming saved cases, exact model revisions and potential cloud charges. Automatic routing reuses measured custom-Skill evidence only when the current definition, dataset/revision, configured model revisions and local hardware match, with at least five cases and at most 30 days of age.
+
+For semantic Memory retrieval, configure **Local Embeddings** in AI & Models, then select **Rebuild Memory Search Index** in Settings. Model/runtime/revision/endpoint/dimension identities keep vectors separate. Rebuilds run incrementally in a worker and can be cancelled; Memory semantic queries run in the background, with FTS keyword fallback.
+
+Read [local setup](docs/ai/LOCAL_MODELS.md), [Private Mode](docs/ai/PRIVATE_MODE.md), [routing](docs/ai/HYBRID_ROUTING.md), [evaluation and embeddings](docs/ai/MODEL_EVALUATION.md), and the [runtime architecture](docs/ai/AI_RUNTIME_ARCHITECTURE.md).
 
 ## Google sign-in configuration
 
@@ -70,9 +90,11 @@ Google sign-in uses the app's Desktop OAuth client ID. If Google's token endpoin
 - Visual Memory records live in `%APPDATA%\SnapFlow\learning.sqlite3`; optional images live under `%APPDATA%\SnapFlow\memory\images`. Local keyword search needs no provider connection. AI Memory Questions are off by default.
 - Contextual Assistant sessions start with the current screenshot analysis only. Selecting a Memory or enabling session search sends bounded saved text, not saved images, to the configured provider when you press Ask. Context sessions are temporary and are cleared when the screenshot result closes.
 - Asking a follow-up or retrying may send the retained screenshot to the provider again.
-- SnapFlow does not run local OCR. The configured AI provider processes images sent with your requests.
+- SnapFlow does not embed a local OCR engine. The selected local Vision runtime or cloud provider processes images sent with your requests.
 - Saved keys are kept in Windows Credential Manager, not in `config.json` or backup archives. Provider and model settings are non-secret values.
 - Settings and user data are stored under `%APPDATA%\SnapFlow`. The source-only `.env` file stays in the project folder.
+- Imported weights/projectors use `%LOCALAPPDATA%\SnapFlow\models`; optional runtimes use `%LOCALAPPDATA%\SnapFlow\runtimes`. Backups include the small `local_models.json` registry, but exclude weights, runtime binaries and credentials. Restored paths may need re-importing on another computer. Installer uninstall behavior is unchanged; optional local assets require manual cleanup if you want to remove them.
+- AI execution History stores runtime/model identity, timing and reasons without prompts, responses, screenshots or extracted values. Existing saved examples, Memory records and evaluation reports retain their separate save/delete policies.
 - Direct Google Calendar event creation happens only after you click **Add to Google Calendar**. Workflow writes to Google Calendar, Google Sheets, or Todoist happen only after you confirm the action. Imported workflows start disabled in Suggest mode.
 
 ## Keyboard shortcuts
@@ -86,6 +108,8 @@ Change the capture shortcut in Settings. If another app already uses it, SnapFlo
 
 ## Development checks
 
+Phase 13 has started with the reliability audit, measured baseline and safe local observability/session foundation. Settings can disable local reliability records; no remote analytics or crash uploads are implemented. See [the Phase 13 journal](docs/PHASE13_IMPLEMENTATION.md) and [event/privacy architecture](docs/OBSERVABILITY.md). Recovery/Safe Mode, performance aggregation, feedback and release gates remain subsequent milestones; this foundation does not establish Beta readiness.
+
 Run the offline test suite, Python compilation check, and application smoke check from the project folder:
 
 ```powershell
@@ -98,7 +122,8 @@ python main.py --smoke-test
 
 - Screen selection is limited to one display. Protected content, secure desktops, and some exclusive full-screen applications may not be capturable.
 - AI output can be incomplete or incorrect. Review extracted values and suggested actions before relying on them.
-- Requests do not stream or retry automatically. Closing a result prevents it from appearing later but cannot retract a request already sent to a provider.
+- Provider transports do not stream or retry automatically. Authorized hybrid routing can make a cloud attempt after local failure or matching quality evidence. Cancellation/closing can discard late results but cannot retract content already sent, and a dispatched synchronous request may still finish.
 - SnapFlow does not start automatically with Windows or install updates automatically.
 - Phase 11 now includes client OAuth/elicitation, notifications/templates, a disabled-by-default SnapFlow server, controlled Workflow preview/execution and trusted SDK interfaces. Source/frozen evidence and remaining release limits are recorded in [the implementation report](docs/PHASE11_IMPLEMENTATION.md). See [client instructions](docs/extensions/MCP_CLIENT.md), [server setup](docs/extensions/MCP_SERVER.md), and [trusted development interfaces](docs/extensions/SNAPFLOW_EXTENSION_SDK.md).
-- Visual Memory currently has local keyword search and optional text-only AI questions. Semantic embeddings, Memory-to-Workflow reuse, retention controls, and packaged Phase 9 validation are still in progress; see `docs/PHASE9_IMPLEMENTATION.md`.
+- Visual Memory now has optional local text embeddings alongside keyword search and optional text-only AI questions. Memory-to-Workflow reuse and retention controls are not added by Phase 12.
+- Phase 12 source functionality does not establish live local VLM, hardware-specific throughput/memory, frozen-build, installer/uninstaller or long-running performance qualification. See [the implementation record](docs/PHASE12_IMPLEMENTATION.md) for evidence and pending release checks.

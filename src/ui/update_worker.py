@@ -9,12 +9,13 @@ class UpdateCheckSignals(QObject):
 
 
 class UpdateCheckWorker(QRunnable):
-    def __init__(self):
+    def __init__(self, channel=None):
         super().__init__()
+        self.channel = channel
         self.signals = UpdateCheckSignals()
 
     def run(self):
         try:
-            self.signals.finished.emit(check_latest_release(), '')
+            self.signals.finished.emit(check_latest_release(channel=self.channel) if self.channel else check_latest_release(), '')
         except Exception:
             self.signals.finished.emit(None, 'unavailable')

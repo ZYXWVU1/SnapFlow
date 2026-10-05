@@ -96,6 +96,8 @@ class WorkflowWorker(QRunnable):
             current_definition = self.storage.get_workflow(self.definition.id) if self.storage is not None else self.definition
             definition = self.definition if current_definition == self.definition else replace(self.definition, enabled=False)
             result = self.executor.execute(definition, self.context, cancel=self.cancel, preview=self.preview)
-        except Exception:
+        except Exception as error:
+            from src.reliability.crashes import record_background_error
+            record_background_error(error)
             result = None
         self.signals.finished.emit(self, result)

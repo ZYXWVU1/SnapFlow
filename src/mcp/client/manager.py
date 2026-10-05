@@ -9,6 +9,7 @@ import time
 from src.context.models import ContextSource
 from src.mcp.identity import SelfConnectionError, instance_marker
 from src.mcp.permissions.service import MCPPermissionService
+from src.network_policy import get_network_policy, NetworkPolicyError
 from .discovery import bounded_json, discover
 from .models import CapabilitySnapshot, ConnectionState, InvocationResult, now
 from .transports import credential_id, make_transport
@@ -16,7 +17,7 @@ from .transports import credential_id, make_transport
 
 class MCPClientManager:
     def __init__(self, storage, credentials=None, *, on_event=None, transport_factory=None,
-            open_browser=None, interaction_handler=None):
+            open_browser=None, interaction_handler=None, execution_journal=None, crash_reporter=None):
         self.storage, self.credentials = storage, credentials
         self.instance_marker = instance_marker(storage.path.parent)
         from .diagnostics import install_safe_sdk_logging
@@ -25,6 +26,8 @@ class MCPClientManager:
         self.on_event = on_event
         self.open_browser = open_browser
         self.interaction_handler = interaction_handler
+        self.execution_journal = execution_journal
+        self.crash_reporter = crash_reporter
         self.transport_factory = transport_factory or (lambda p, c: make_transport(p, c,
             open_browser=lambda url: self._authorize(p, url)))
         self._states, self._snapshots, self._connections = {}, {}, {}
@@ -95,6 +98,8 @@ class MCPClientManager:
                 def run():
                     self._loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(self._loop)
+                    if self.crash_reporter:
+                        self.crash_reporter.attach_asyncio(self._loop)
                     ready.set()
                     self._loop.run_forever()
                     self._loop.run_until_complete(self._loop.shutdown_asyncgens())
@@ -124,6 +129,7 @@ class MCPClientManager:
         return self._submit(self._connect(connection_id))
 
     async def _authorize(self, profile, url):
+        get_network_policy().require_allowed(url, 'oauth')
         previous = self.state(profile.id).status
         self._state(profile.id, status='needs_authentication')
         if (self.open_browser is None or self.storage.get_profile(profile.id) != profile or
@@ -170,6 +176,7 @@ class MCPClientManager:
         profile = self.storage.get_profile(connection_id)
         if profile is None or not profile.enabled:
             raise ValueError('Enable this profile before connecting.')
+        self._require_network(profile)
         if connection_id in self._connections:
             return self.state(connection_id)
         if len(self._connections) >= 4:
@@ -179,10 +186,19 @@ class MCPClientManager:
         task = self._loop.create_task(self._own_connection(profile, queue, ready))
         self._connections[connection_id] = (task, queue)
         try:
-            return await ready
+            from src.observability.performance import trace, emit
+            with trace('mcp_connect', 'mcp'):
+                result = await ready
+            emit('mcp_connection_completed', component='mcp', success=True,
+                 properties={'transport': profile.transport})
+            return result
         except asyncio.CancelledError:
+            emit('mcp_connection_completed', component='mcp', success=False, properties={'transport': profile.transport})
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            raise
+        except Exception:
+            emit('mcp_connection_completed', component='mcp', success=False, properties={'transport': profile.transport})
             raise
 
     async def _own_connection(self, profile, queue, ready):
@@ -190,6 +206,7 @@ class MCPClientManager:
         self._state(connection_id, status='connecting', error='')
         active_response = None
         try:
+            self._require_network(profile)
             from mcp import Client
             transport = self.transport_factory(profile, self.credentials)
             # Enter/operate/exit SDK and anyio scopes in this same task.
@@ -201,7 +218,9 @@ class MCPClientManager:
                         message_handler=lambda message: self._message(connection_id, queue, message)))
                     if client.instructions == self.instance_marker:
                         raise SelfConnectionError()
-                    snapshot = await discover(connection_id, client)
+                    from src.observability.performance import trace
+                    with trace('mcp_discovery', 'mcp'):
+                        snapshot = await discover(connection_id, client)
                 self.storage.reconcile_policies(connection_id, {t.name: t.fingerprint for t in snapshot.tools})
                 with self._lock:
                     self._snapshots[connection_id] = snapshot
@@ -265,6 +284,9 @@ class MCPClientManager:
 
     @staticmethod
     def _safe_error(exc):
+        if isinstance(exc, NetworkPolicyError) or (isinstance(exc, BaseExceptionGroup) and
+                exc.subgroup(NetworkPolicyError) is not None):
+            return 'Private Mode blocks remote MCP. Use a local stdio or loopback connection.'
         if isinstance(exc, SelfConnectionError) or (isinstance(exc, BaseExceptionGroup) and
                 exc.subgroup(SelfConnectionError) is not None):
             return 'This MCP server appears to be this SnapFlow instance. Connection blocked.'
@@ -278,6 +300,9 @@ class MCPClientManager:
         return f'MCP operation failed ({type(exc).__name__}). Check the connection and configuration.'
 
     async def _request(self, connection_id, operation, *args):
+        profile = self.storage.get_profile(connection_id)
+        if profile is not None:
+            self._require_network(profile)
         entry = self._connections.get(connection_id)
         if entry is None or self.state(connection_id).status not in ('connected', 'permission_review_required', 'awaiting_user_input'):
             raise ValueError('MCP server is unavailable. Connect it first.')
@@ -293,6 +318,7 @@ class MCPClientManager:
     async def _operate(self, profile, client, operation, args):
         if self.storage.get_profile(profile.id) != profile:
             raise ValueError('Profile changed. Reconnect before using capabilities.')
+        self._require_network(profile)
         snapshot = self.snapshot(profile.id)
         if operation == 'refresh':
             updated = await discover(profile.id, client)
@@ -333,11 +359,61 @@ class MCPClientManager:
                 return InvocationResult(False, 'Connection profile changed.', category='unavailable')
             if execution_guard is not None and not execution_guard():
                 return InvocationResult(False, 'Execution cancelled or Workflow changed.', category='cancelled')
+            self._require_network(profile)
+            invocation = None
+            policy = self.permissions.policy(profile.id, name, tool.fingerprint)
+            if policy.get('risk', 'unknown') != 'read_only':
+                from src.reliability.policy import get_safety_policy
+                if not get_safety_policy().allows('external_write'):
+                    return InvocationResult(False, 'Safe Mode blocks extension writes.', category='safe_mode')
+                try:
+                    if self.execution_journal is None:
+                        from src.reliability.journal import ExecutionJournal
+                        self.execution_journal = ExecutionJournal(self.storage.path.parent / 'recovery.sqlite3')
+                    invocation = self.execution_journal.plan('mcp_write')
+                    self.execution_journal.started(invocation)
+                except Exception:
+                    return InvocationResult(False, 'Write not sent: recovery journal unavailable.', category='journal_unavailable')
+            def finish_write(status):
+                if invocation is not None:
+                    self.execution_journal.finish(invocation, status)
             try:
-                raw = await client.call_tool(name, arguments, read_timeout_seconds=profile.timeout_seconds)
+                # Journaling can wait on disk. Recheck authority at dispatch.
+                if (self.storage.get_profile(profile.id) != profile or
+                    not self.permissions.permits(profile.id, name, tool.fingerprint, approved=approved) or
+                    (execution_guard is not None and not execution_guard())):
+                    finish_write('failed')
+                    return InvocationResult(False, 'Execution cancelled or permissions changed.', category='cancelled')
+                if invocation is not None and not get_safety_policy().allows('external_write'):
+                    finish_write('failed')
+                    return InvocationResult(False, 'Safe Mode blocks extension writes.', category='safe_mode')
+                self._require_network(profile)
+                from src.observability.performance import trace, emit
+                with trace('mcp_tool_call', 'mcp'):
+                    raw = await client.call_tool(name, arguments, read_timeout_seconds=profile.timeout_seconds)
+                emit('mcp_tool_completed', component='mcp', success=not raw.is_error,
+                     properties={'risk': policy.get('risk', 'unknown')})
+            except asyncio.CancelledError:
+                from src.observability.performance import emit
+                emit('mcp_tool_completed', component='mcp', success=False, properties={'risk': policy.get('risk', 'unknown')})
+                try:
+                    finish_write('unknown')
+                except Exception:
+                    pass
+                raise
             except Exception as exc:
+                from src.observability.performance import emit
+                emit('mcp_tool_completed', component='mcp', success=False, properties={'risk': policy.get('risk', 'unknown')})
+                try:
+                    finish_write('unknown')
+                except Exception:
+                    pass
                 return InvocationResult(False, self._safe_error(exc), category='timeout' if isinstance(exc, TimeoutError) else 'transport',
                     duration_seconds=time.monotonic() - start)
+            try:
+                finish_write('unknown' if raw.is_error else 'completed')
+            except Exception:
+                return InvocationResult(False, 'Write result could not be recorded. Review the external service before retrying.', category='unknown_result')
             text_parts, total, truncated = [], 0, False
             for content in raw.content[:64]:
                 text = content.text if content.type == 'text' else f'[{content.type} content omitted]'
@@ -374,7 +450,10 @@ class MCPClientManager:
                 metadata = next((r for r in snapshot.resources if r['uri'] == uri), None)
             if metadata is None:
                 raise ValueError('Choose a discovered resource.')
-            raw = await client.read_resource(uri)
+            self._require_network(profile)
+            from src.observability.performance import trace
+            with trace('mcp_resource', 'mcp'):
+                raw = await client.read_resource(uri)
             chunks = []
             for item in raw.contents:
                 if (not hasattr(item, 'text') or str(item.uri) != uri or
@@ -396,7 +475,10 @@ class MCPClientManager:
             required = {a['name'] for a in descriptor.get('arguments') or () if a.get('required')}
             if set(arguments) - allowed or not required <= set(arguments):
                 raise ValueError('Prompt arguments do not match the discovered prompt.')
-            raw = await client.get_prompt(name, arguments)
+            self._require_network(profile)
+            from src.observability.performance import trace
+            with trace('mcp_prompt', 'mcp'):
+                raw = await client.get_prompt(name, arguments)
             texts = []
             for message in raw.messages:
                 if message.content.type != 'text':
@@ -406,6 +488,11 @@ class MCPClientManager:
                     raise ValueError('Prompt exceeds its size limit.')
             return '\n'.join(texts)
         raise ValueError('Unsupported MCP operation.')
+
+    @staticmethod
+    def _require_network(profile):
+        get_network_policy().require_allowed('stdio' if profile.transport == 'stdio' else profile.url,
+            'mcp_stdio' if profile.transport == 'stdio' else 'mcp_remote')
 
     def call_tool(self, connection_id, name, arguments, *, approved=False, expected_fingerprint=None, execution_guard=None):
         if expected_fingerprint is None:

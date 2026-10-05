@@ -1,5 +1,6 @@
 """Coordinate permission checks, Memory lookup, context assembly, and AI answer."""
 from dataclasses import replace
+from src.observability.performance import measured, trace
 import re
 from src.context.answer_validator import validate_answer
 from src.context.assembler import ContextAssembler
@@ -24,13 +25,16 @@ _SYSTEM = (
 class ContextController:
     def __init__(self, store, client, permissions, *, assembler=None):
         self.permissions = permissions
-        self.retrieval = ContextRetrievalService(store, permissions)
+        self.retrieval = ContextRetrievalService(store, permissions,
+            cancelled=getattr(client, 'cancellation_callback', None))
         self.assembler = assembler or ContextAssembler()
         self.client = client
 
+    @measured('context_answer', 'context', event_type='context_completed')
     def answer(self, session, request):
         self.permissions.validate_request(session, request)
-        records = self.retrieval.retrieve(session, request)
+        with trace('context_retrieval', 'context'):
+            records = self.retrieval.retrieve(session, request)
         # Bind old citation labels to the sources in this request. Search ranking can
         # assign the same label to a different Memory on a later turn.
         current_sources = self.assembler.build_context(request, records, ()).sources

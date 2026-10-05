@@ -1,12 +1,18 @@
 """Validated, non-secret settings stored beside the application."""
 import json
 import math
+import os
+import shutil
+from datetime import datetime, timezone
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from src.prompts import MODES, ALIASES
 from src.paths import AppPaths
+from src.app_version import RELEASE_CHANNEL
+from src.network_policy import is_loopback_url
 
 DEFAULT_PATHS = AppPaths()
 ROOT = DEFAULT_PATHS.resource_root
@@ -41,6 +47,7 @@ class Config:
     monthly_cost_warning_usd: float = 5.0
     max_evaluation_cases: int = 100
     automatic_update_checks: bool = False
+    update_channel: str = RELEASE_CHANNEL
     ai_base_url: str | None = None
     ai_model: str | None = None
     visual_memory_enabled: bool = True
@@ -49,8 +56,47 @@ class Config:
     ai_memory_questions: bool = False
     contextual_assistant_enabled: bool = True
     context_memory_search_enabled: bool = False
+    local_observability_enabled: bool = True
+    local_crash_reports_enabled: bool = True
+    ai_execution_mode: str = 'cloud_only'
+    private_mode: bool = False
+    allow_cloud_fallback: bool = False
+    local_ai_endpoint: str = 'http://127.0.0.1:8080/v1'
+    local_ai_model: str | None = None
+    local_ai_model_version: str | None = None
+    ai_model_version: str | None = None
+    local_ai_vision: bool = False
+    local_ai_structured_output: bool = False
+    local_ai_context_length: int = 8192
+    local_embedding_model: str | None = None
+    local_embedding_dimension: int = 0
+    local_embedding_version: str = '1'
 
     def __post_init__(self) -> None:
+        if self.update_channel not in ('stable', 'beta', 'dev'):
+            raise ValueError('Unknown update channel.')
+        if self.ai_execution_mode not in ('automatic', 'prefer_local', 'local_only', 'cloud_only', 'ask_every_time'):
+            raise ValueError('Unknown AI execution mode.')
+        for name in ('private_mode', 'allow_cloud_fallback', 'local_ai_vision', 'local_ai_structured_output',
+                     'local_observability_enabled', 'local_crash_reports_enabled'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f'{name} must be true or false.')
+        try:
+            local_url = urlsplit(self.local_ai_endpoint)
+            local_port = local_url.port
+            local_valid = is_loopback_url(self.local_ai_endpoint) and not local_url.query and not local_url.fragment
+        except (TypeError, ValueError):
+            local_valid = False
+        if not local_valid:
+            raise ValueError('Local AI requires an HTTP(S) loopback endpoint.')
+        for name in ('local_ai_model', 'local_embedding_model', 'local_ai_model_version', 'ai_model_version', 'local_embedding_version'):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 128):
+                raise ValueError('Local model identifiers must contain 1–128 characters.')
+        if type(self.local_ai_context_length) is not int or not 256 <= self.local_ai_context_length <= 1000000:
+            raise ValueError('Local context length must be between 256 and 1,000,000.')
+        if type(self.local_embedding_dimension) is not int or not 0 <= self.local_embedding_dimension <= 65536:
+            raise ValueError('Embedding dimension must be between 0 and 65,536.')
         if isinstance(self.default_mode, str):
             object.__setattr__(self, 'default_mode', ALIASES.get(self.default_mode, self.default_mode))
         if not isinstance(self.hotkey, str):
@@ -122,7 +168,30 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         raise ValueError(f"Unable to load {path.name}: {exc}") from exc
 
 
+def backup_corrupt_settings(path):
+    path = Path(path)
+    if path.is_symlink() or not path.is_file():
+        raise OSError('Corrupt settings must be a regular file.')
+    directory = path.parent / 'backups'
+    if directory.is_symlink():
+        raise OSError('Settings backup directory cannot be a symbolic link.')
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / ('corrupt-settings-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') +
+                               '-' + uuid.uuid4().hex + '.json')
+    with path.open('rb') as source, destination.open('xb') as target:
+        shutil.copyfileobj(source, target)
+        target.flush()
+        os.fsync(target.fileno())
+    return destination
+
+
 def save_config(config: Config, path: Path = CONFIG_PATH) -> None:
+    path = Path(path)
+    if path.exists():
+        try:
+            load_config(path)
+        except ValueError:
+            backup_corrupt_settings(path)
     temp = path.with_suffix(".tmp")
     try:
         temp.write_text(json.dumps(asdict(config), indent=2) + "\n", encoding="utf-8")

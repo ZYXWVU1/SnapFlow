@@ -26,11 +26,12 @@ class ConnectionOutcome:
 
 class IntegrationService:
     def __init__(self, registry, storage, credentials, *, transport=None, google_client_id=None,
-                 google_client_secret=None, browser_open=None):
+                 google_client_secret=None, browser_open=None, execution_journal=None):
         self.registry, self.storage, self.credentials = registry, storage, credentials
         self.transport = transport
         self.google_client_id, self.google_client_secret = google_client_id, google_client_secret
         self.browser_open = browser_open
+        self.execution_journal = execution_journal
 
     def _save(self, integration_id, status, account_label=None, capabilities=()):
         previous = self.storage.get(integration_id)
@@ -41,7 +42,8 @@ class IntegrationService:
 
     def _todoist(self):
         api = FixedApiClient('https://api.todoist.com/api/v1/',
-                             lambda: self.credentials.get('todoist'), transport=self.transport)
+                             lambda: self.credentials.get('todoist'), transport=self.transport,
+                             execution_journal=self.execution_journal)
         return TodoistProvider(api)
 
     def _google_auth(self, client_id=None):
@@ -53,12 +55,14 @@ class IntegrationService:
 
     def _calendar(self, auth):
         api = FixedApiClient('https://www.googleapis.com/calendar/v3/',
-            lambda: auth.access_token('google_calendar'), transport=self.transport)
+            lambda: auth.access_token('google_calendar'), transport=self.transport,
+            execution_journal=self.execution_journal)
         return GoogleCalendarProvider(api)
 
     def _sheets(self, auth):
         api = FixedApiClient('https://sheets.googleapis.com/v4/',
-            lambda: auth.access_token('google_sheets'), transport=self.transport)
+            lambda: auth.access_token('google_sheets'), transport=self.transport,
+            execution_journal=self.execution_journal)
         return GoogleSheetsProvider(api)
 
     def list_resources(self, action_id, config):

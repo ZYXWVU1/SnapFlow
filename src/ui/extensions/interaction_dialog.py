@@ -4,6 +4,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout
 from src.ui.design.components import AppButton
 from src.mcp.client.interactions import validate_response
+from src.network_policy import get_network_policy, NetworkPolicyError
 from .schema_form import SchemaForm
 
 
@@ -51,9 +52,13 @@ class InteractionDialog(QDialog):
                 response['content'] = self.form.value()
                 if validate_response(self.request, response).action != 'accept':
                     raise ValueError('Values do not match the requested fields.')
-            elif not QDesktopServices.openUrl(QUrl(self.request['url'])):
-                raise ValueError('Unable to open authorization browser.')
+            else:
+                get_network_policy().require_allowed(self.request['url'], 'oauth')
+                if not QDesktopServices.openUrl(QUrl(self.request['url'])):
+                    raise ValueError('Unable to open authorization browser.')
             self.response = response
             self.accept()
+        except NetworkPolicyError as exc:
+            self.error.setText(str(exc))
         except (ValueError, TypeError):
             self.error.setText('Check the requested fields and try again.')

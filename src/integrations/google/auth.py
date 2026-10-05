@@ -12,6 +12,7 @@ import webbrowser
 import httpx
 
 from src.app_version import APP_NAME
+from src.network_policy import get_network_policy, NetworkPolicyError, require_http_request
 
 
 AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -42,7 +43,8 @@ class GoogleOAuth:
             raise ValueError('A Google Desktop OAuth client ID is required.')
         self.client_id, self.client_secret = client_id, client_secret
         self.credentials, self.clock, self.browser_open = credentials, clock, browser_open
-        self.http = httpx.Client(transport=transport, timeout=20.0, follow_redirects=False)
+        self.http = httpx.Client(transport=transport, timeout=20.0, follow_redirects=False,
+            trust_env=False, event_hooks={'request': [lambda request: require_http_request(request, 'oauth')]})
 
     @staticmethod
     def _scopes(capabilities):
@@ -70,6 +72,7 @@ class GoogleOAuth:
         return AUTH_URL + '?' + query
 
     def _token_request(self, data):
+        get_network_policy().require_allowed(TOKEN_URL, 'oauth')
         try:
             response = self.http.post(TOKEN_URL, data=data)
             if response.status_code != 200:
@@ -93,6 +96,8 @@ class GoogleOAuth:
             if not isinstance(payload, dict) or not isinstance(payload.get('access_token'), str):
                 raise OAuthFailure('Google returned an invalid authorization response.')
             return payload
+        except NetworkPolicyError:
+            raise
         except (httpx.RequestError, ValueError):
             raise OAuthFailure('Unable to complete Google authorization.') from None
 
@@ -153,6 +158,7 @@ class GoogleOAuth:
     def connect(self, capabilities, *, timeout=180):
         capabilities = tuple(capabilities)
         self._scopes(capabilities)
+        get_network_policy().require_allowed(AUTH_URL, 'oauth')
         state = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
         received = {}
@@ -182,6 +188,7 @@ class GoogleOAuth:
         redirect_uri = f'http://127.0.0.1:{server.server_port}'
         try:
             url = self.authorization_url(capabilities, redirect_uri, state, verifier)
+            get_network_policy().require_allowed(url, 'oauth')
             if not self.browser_open(url):
                 raise OAuthFailure('Unable to open the browser for Google authorization.')
             server.handle_request()

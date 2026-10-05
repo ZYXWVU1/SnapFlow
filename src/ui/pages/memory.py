@@ -1,7 +1,9 @@
 """Local Visual Memory search page."""
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+import threading
 
-from PySide6.QtCore import Qt, Signal, QDate
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot, QDate
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QIcon
 import sqlite3
@@ -10,6 +12,41 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineE
 
 from src.ui.design.components import AppButton, Card, PageHeader
 from .common import ScrollPage
+
+
+@dataclass(frozen=True)
+class _SearchRequest:
+    generation: int
+    query: str
+    filters: dict
+    offset: int
+
+
+class _SearchSignals(QObject):
+    completed = Signal(object, object, bool)
+
+
+class _SemanticSearchWorker(QRunnable):
+    def __init__(self, store, request):
+        super().__init__()
+        self.store = store
+        self.request = request
+        self.signals = _SearchSignals()
+        self.cancelled = threading.Event()
+
+    def run(self):
+        try:
+            if self.cancelled.is_set():
+                raise ValueError('Semantic search cancelled.')
+            hits = list(self.store.hybrid_search(self.request.query,
+                filters=dict(self.request.filters), limit=20, offset=self.request.offset,
+                cancelled=self.cancelled.is_set))
+            if self.cancelled.is_set():
+                raise ValueError('Semantic search cancelled.')
+        except Exception:
+            self.signals.completed.emit(self.request, [], True)
+        else:
+            self.signals.completed.emit(self.request, hits, False)
 
 
 class MemoryPage(ScrollPage):
@@ -21,6 +58,13 @@ class MemoryPage(ScrollPage):
         super().__init__(parent)
         self.store = store
         self.offset = 0
+        self._search_generation = 0
+        self._search_worker = None
+        self._pending_search = None
+        self._search_stopped = False
+        self._semantic_available = getattr(store, 'semantic_index', None) is not None
+        self._search_pool = QThreadPool(self)
+        self._search_pool.setMaxThreadCount(1)
         self.content.addWidget(PageHeader('Visual Memory',
             'Search screenshots and extracted information you chose to save.'))
         search_card = Card()
@@ -28,6 +72,11 @@ class MemoryPage(ScrollPage):
         self.query.setPlaceholderText('Search memories...')
         self.query.returnPressed.connect(self._restart)
         search_card.content.addWidget(self.query)
+        self.semantic_search = QCheckBox('Semantic + keyword search')
+        self.semantic_search.setEnabled(self._semantic_available)
+        self.semantic_search.setChecked(self._semantic_available)
+        self.semantic_search.toggled.connect(self._restart)
+        search_card.content.addWidget(self.semantic_search)
         filters = QHBoxLayout()
         self.source = QComboBox()
         for label, value in [('All types', ''), ('Built-in Skills', 'builtin_skill'),
@@ -113,6 +162,29 @@ class MemoryPage(ScrollPage):
         self._update_custom_dates()
         self.refresh()
 
+    @property
+    def semantic_search_running(self):
+        return (self._search_worker is not None or self._pending_search is not None or
+                self._search_pool.activeThreadCount() > 0)
+
+    def stop_semantic_search(self):
+        self._search_stopped = True
+        self._search_generation += 1
+        self._pending_search = None
+        if self._search_worker is not None:
+            self._search_worker.cancelled.set()
+
+    def set_semantic_available(self, available):
+        available = bool(available)
+        newly_available = available and not self._semantic_available
+        self._semantic_available = available
+        self.semantic_search.blockSignals(True)
+        self.semantic_search.setEnabled(available)
+        if not available or newly_available:
+            self.semantic_search.setChecked(available)
+        self.semantic_search.blockSignals(False)
+        self.refresh()
+
     def set_ai_enabled(self, enabled):
         self.ask_button.setEnabled(enabled)
         self.question.setEnabled(enabled)
@@ -178,11 +250,51 @@ class MemoryPage(ScrollPage):
         return filters
 
     def refresh(self):
+        self._search_generation += 1
+        if self._search_worker is not None:
+            self._search_worker.cancelled.set()
+        request = _SearchRequest(self._search_generation, self.query.text(),
+                                 self._filters(), self.offset)
+        if (request.query.strip() and self.semantic_search.isChecked() and
+                self._semantic_available and not self._search_stopped):
+            self.status.setText('Searching saved memories…')
+            if self._search_worker is not None:
+                self._pending_search = request
+            else:
+                self._start_semantic_search(request)
+        else:
+            self._pending_search = None
+            self._keyword_search(request)
+
+    def _start_semantic_search(self, request):
+        worker = _SemanticSearchWorker(self.store, request)
+        worker.signals.completed.connect(self._semantic_search_completed,
+                                         Qt.ConnectionType.QueuedConnection)
+        self._search_worker = worker
+        self._search_pool.start(worker)
+
+    @Slot(object, object, bool)
+    def _semantic_search_completed(self, request, hits, failed):
+        self._search_worker = None
+        if request.generation == self._search_generation:
+            if failed:
+                self._keyword_search(request, semantic_failed=True)
+            else:
+                self._show_hits(request, hits)
+        pending = self._pending_search
+        self._pending_search = None
+        if pending is not None and pending.generation == self._search_generation and not self._search_stopped:
+            self._start_semantic_search(pending)
+
+    def _keyword_search(self, request, *, semantic_failed=False):
         try:
-            hits = self.store.search(self.query.text(), self._filters(), limit=20, offset=self.offset)
+            hits = self.store.search(request.query, request.filters, limit=20, offset=request.offset)
         except (ValueError, OSError, sqlite3.Error) as exc:
             self.status.setText(str(exc))
             return
+        self._show_hits(request, hits, semantic_failed=semantic_failed)
+
+    def _show_hits(self, request, hits, *, semantic_failed=False):
         self.results.clear()
         for hit in hits:
             try:
@@ -197,12 +309,14 @@ class MemoryPage(ScrollPage):
             item.setData(Qt.ItemDataRole.UserRole, hit.memory_id)
             self.results.addItem(item)
         if hits:
-            self.status.setText(f'{self.offset + 1}–{self.offset + len(hits)} saved memories')
-        elif not self.query.text().strip() and not self._filters():
+            self.status.setText(f'{request.offset + 1}–{request.offset + len(hits)} saved memories')
+        elif not request.query.strip() and not request.filters:
             self.status.setText('No Visual Memories Yet. Save a screenshot result to begin.')
         else:
             self.status.setText('No matching memories found. Try clearing the filters.')
-        self.previous_button.setEnabled(self.offset > 0)
+        if semantic_failed:
+            self.status.setText('Semantic search is unavailable; showing keyword matches.\n' + self.status.text())
+        self.previous_button.setEnabled(request.offset > 0)
         self.next_button.setEnabled(len(hits) == 20)
         self.open_button.setEnabled(bool(hits))
 

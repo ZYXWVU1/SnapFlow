@@ -1,6 +1,7 @@
 """Contracts for extraction, validated results and presentation metadata."""
 from dataclasses import dataclass, field
 import json
+from src.observability.performance import measured
 
 from src.modes import ResponseFormatError
 from src.smart.models import valid_confidence
@@ -40,8 +41,14 @@ class Skill:
                 'Return valid JSON only, without commentary, matching this schema: '
                 + json.dumps(self.schema) + '. ' + self.instructions)
 
+    @measured('vision_inference', 'skill', event_type='skill_completed')
     def extract(self, client, image_bytes, confidence):
-        response = client.request_image(image_bytes, self.prompt(), mode='skill')
+        if hasattr(client, 'request_validated_image'):
+            options = {'metadata': client.routing_metadata(self)} if hasattr(client, 'routing_metadata') else {}
+            response = client.request_validated_image(image_bytes, self.prompt(),
+                lambda text: self.parse(text, confidence), mode='skill', **options)
+        else:
+            response = client.request_image(image_bytes, self.prompt(), mode='skill')
         return self.parse(response, confidence)
 
     def parse(self, response, confidence=0.0):

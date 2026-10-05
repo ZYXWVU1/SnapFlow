@@ -20,6 +20,13 @@ class SettingsPage(ScrollPage):
     update_check_requested = Signal()
     onboarding_requested = Signal()
     memory_rebuild_requested = Signal()
+    ai_runtime_requested = Signal()
+    clear_analytics_requested = Signal()
+    beta_features_requested = Signal()
+    feedback_requested = Signal()
+    health_center_requested = Signal()
+    beta_insights_requested = Signal()
+    report_issue_requested = Signal()
 
     def __init__(self, config=None, parent=None, *, paths=None):
         super().__init__(parent)
@@ -39,6 +46,18 @@ class SettingsPage(ScrollPage):
         ai.content.addWidget(QLabel('Default mode'))
         self.mode_label = QLabel()
         ai.content.addWidget(self.mode_label)
+        self.ai_runtime_label = QLabel()
+        self.ai_runtime_label.setWordWrap(True)
+        self.ai_runtime_label.setTextFormat(Qt.TextFormat.PlainText)
+        ai.content.addWidget(self.ai_runtime_label)
+        self.execution_details_label = QLabel('No AI execution details recorded yet.')
+        self.execution_details_label.setWordWrap(True)
+        self.execution_details_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.execution_details_label.setProperty('role', 'muted')
+        ai.content.addWidget(self.execution_details_label)
+        self.ai_runtime_button = AppButton('AI & Models', variant='primary')
+        self.ai_runtime_button.clicked.connect(self.ai_runtime_requested)
+        ai.content.addWidget(self.ai_runtime_button)
         self.content.addWidget(ai)
         appearance = Card()
         appearance.content.addWidget(QLabel('Appearance'))
@@ -47,10 +66,11 @@ class SettingsPage(ScrollPage):
         self.content.addWidget(appearance)
         privacy = Card()
         privacy.content.addWidget(QLabel('Privacy'))
-        note = QLabel('Screenshots are kept in memory. Selected images are sent to your configured AI provider. Workflow History stores status only.')
-        note.setWordWrap(True)
-        note.setProperty('role', 'muted')
-        privacy.content.addWidget(note)
+        self.privacy_note = QLabel()
+        self.privacy_note.setWordWrap(True)
+        self.privacy_note.setTextFormat(Qt.TextFormat.PlainText)
+        self.privacy_note.setProperty('role', 'muted')
+        privacy.content.addWidget(self.privacy_note)
         self.content.addWidget(privacy)
         memory = Card()
         memory.content.addWidget(QLabel('Visual Memory'))
@@ -78,11 +98,17 @@ class SettingsPage(ScrollPage):
         self.diagnostics_info_label.setTextFormat(Qt.TextFormat.PlainText)
         diagnostics.content.addWidget(self.diagnostics_info_label)
         self.diagnostics_note = QLabel(
-            'An exported support bundle contains app version and system details plus sanitized local logs. '
-            'It excludes screenshots, extracted data, configuration, user content, and credentials; it is never sent automatically.')
+            'Preview the exact safe diagnostics before exporting a local ZIP. It excludes raw logs, '
+            'screenshots, extracted data, configuration, user content, and credentials; it is never sent automatically.')
         self.diagnostics_note.setWordWrap(True)
         self.diagnostics_note.setProperty('role', 'muted')
         diagnostics.content.addWidget(self.diagnostics_note)
+        self.reliability_status_label = QLabel()
+        self._reliability_message = ''
+        self._reliability_default = ''
+        self.reliability_status_label.setWordWrap(True)
+        self.reliability_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        diagnostics.content.addWidget(self.reliability_status_label)
         self.health_status_label = QLabel('Health check has not been run.')
         self.health_status_label.setWordWrap(True)
         self.health_status_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -90,13 +116,39 @@ class SettingsPage(ScrollPage):
         self.health_check_button = AppButton('Run Basic Health Check')
         self.health_check_button.clicked.connect(self.health_check_requested)
         diagnostics.content.addWidget(self.health_check_button)
+        self.health_check_button.hide()
+        self.health_status_label.hide()
         self.export_diagnostics_button = AppButton('Export Support Bundle')
         self.export_diagnostics_button.clicked.connect(self.support_bundle_requested)
         diagnostics.content.addWidget(self.export_diagnostics_button)
+        self.clear_analytics_button = AppButton('Clear Usage & Diagnostics Data')
+        self.clear_analytics_button.clicked.connect(self.clear_analytics_requested)
+        diagnostics.content.addWidget(self.clear_analytics_button)
+        self.health_center_button = AppButton('Health Center', variant='primary')
+        self.health_center_button.clicked.connect(self.health_center_requested)
+        diagnostics.content.addWidget(self.health_center_button)
+        self.feedback_button = AppButton('Send Feedback')
+        self.feedback_button.clicked.connect(self.feedback_requested)
+        diagnostics.content.addWidget(self.feedback_button)
+        self.report_issue_button = AppButton('Report This Issue')
+        self.report_issue_button.setEnabled(False)
+        self.report_issue_button.clicked.connect(self.report_issue_requested)
+        diagnostics.content.addWidget(self.report_issue_button)
+        self.beta_features_button = AppButton('Beta Features')
+        self.beta_features_button.clicked.connect(self.beta_features_requested)
+        diagnostics.content.addWidget(self.beta_features_button)
+        self.beta_insights_button = AppButton('Beta Insights')
+        self.beta_insights_button.setEnabled(False)
+        self.beta_insights_button.clicked.connect(self.beta_insights_requested)
+        diagnostics.content.addWidget(self.beta_insights_button)
         self.content.addWidget(diagnostics)
 
         usage = Card()
         usage.content.addWidget(QLabel('Usage & Costs'))
+        self.runtime_usage_label = QLabel('No local or cloud AI requests recorded yet.')
+        self.runtime_usage_label.setWordWrap(True)
+        self.runtime_usage_label.setTextFormat(Qt.TextFormat.PlainText)
+        usage.content.addWidget(self.runtime_usage_label)
         self.usage_summary_label = QLabel('No provider usage recorded this month.')
         self.usage_summary_label.setWordWrap(True)
         self.usage_summary_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -166,7 +218,18 @@ class SettingsPage(ScrollPage):
         if config is None:
             return
         self.hotkey_label.setText(' + '.join(part.capitalize() for part in config.hotkey.split('+')))
+        self._reliability_default = (
+            'Local reliability records: on. No automatic uploads.' if config.local_observability_enabled
+            else 'Local reliability records: off. Abnormal-session detection is unavailable.')
+        self.reliability_status_label.setText(self._reliability_message or self._reliability_default)
         self.mode_label.setText(config.default_mode.title())
+        execution = getattr(config, 'ai_execution_mode', 'cloud_only').replace('_', ' ').title()
+        private = getattr(config, 'private_mode', False)
+        self.ai_runtime_label.setText(
+            f'AI execution: {execution} · Private Mode {"on" if private else "off"}')
+        self.privacy_note.setText(
+            'Private Mode: external network access and cloud fallback are blocked. AI content stays on this computer.'
+            if private else 'Screenshots are kept in memory. AI requests use the configured execution policy; cloud requests send selected content to your provider. Workflow History stores status only.')
         self.theme_label.setText(config.theme.title())
         self.memory_status.setText(
             ('Enabled' if config.visual_memory_enabled else 'Disabled for new saves') +
@@ -181,6 +244,10 @@ class SettingsPage(ScrollPage):
             'Monthly warning: disabled' if config.monthly_cost_warning_usd == 0
             else f'Monthly warning: ${config.monthly_cost_warning_usd:.2f}')
 
+    def set_reliability_status(self, message=''):
+        self._reliability_message = message
+        self.reliability_status_label.setText(message or self._reliability_default)
+
     def set_storage_usage(self, size_bytes):
         size = max(0, int(size_bytes))
         if size < 1024:
@@ -193,6 +260,38 @@ class SettingsPage(ScrollPage):
                     label = f'{value:.1f} {unit}'
                     break
         self.storage_usage_label.setText(label)
+
+    def set_runtime_summary(self, summary):
+        """Show measured runtime activity; unavailable latency stays unavailable."""
+        def latency(key):
+            value = summary.get(key)
+            return 'Unavailable' if value is None else f'{value:.0f} ms'
+        self.runtime_usage_label.setText(
+            f'LOCAL: {summary.get("local_requests", 0)} request(s) ({summary.get("local_percentage", 0):.1f}%) · '
+            f'CLOUD: {summary.get("cloud_requests", 0)} request(s) ({summary.get("cloud_percentage", 0):.1f}%)\n'
+            f'Average local latency: {latency("avg_local_latency_ms")} · '
+            f'Average cloud latency: {latency("avg_cloud_latency_ms")}\n'
+            f'Cloud fallbacks: {summary.get("fallback_count", 0)} · '
+            f'Private Mode requests: {summary.get("private_requests", 0)}')
+
+    def set_execution_details(self, response, decision=None):
+        """Expose the latest completed request without showing its prompt/content."""
+        if response is None:
+            self.execution_details_label.setText('No AI execution details recorded yet.')
+            return
+        reasons = tuple(getattr(decision, 'reason_codes', ()) or ())
+        movement = 'LOCAL' if response.local else 'CLOUD'
+        if any('FALLBACK' in reason.upper() for reason in reasons):
+            movement = 'HYBRID → ' + movement
+        if response.local:
+            cost = 'API Cost: $0'
+        else:
+            estimate = getattr(decision, 'estimated_cost', None)
+            cost = 'API cost estimate unavailable' if estimate is None else f'Estimated API cost: ${estimate:.4f}'
+        reason_text = ', '.join(reason.replace('_', ' ') for reason in reasons) or 'Unavailable'
+        self.execution_details_label.setText(
+            f'Last AI request: {movement}\nRuntime: {response.runtime_id} · Model: {response.model_id}\n'
+            f'Reason: {reason_text}\nLatency: {response.latency_ms:.0f} ms · {cost}')
 
     def set_usage_summary(self, summary, threshold):
         self.usage_summary_label.setText(

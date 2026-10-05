@@ -52,11 +52,14 @@ class MainWindow(QMainWindow):
     memory_open_requested = Signal(str)
     memory_ask_requested = Signal(str, object)
     memory_rebuild_requested = Signal()
+    ai_runtime_requested = Signal()
 
     def __init__(self, hotkey, parent=None, *, skills_storage=None, workflows_storage=None,
                  history=None, config=None, integration_registry=None, connection_storage=None, paths=None,
                  memory_store=None, extension_service=None):
         super().__init__(parent)
+        import time
+        self._constructed_at = time.perf_counter()
         self.setObjectName('AppShell')
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(620, 480)
@@ -84,6 +87,9 @@ class MainWindow(QMainWindow):
         brand_font.setBold(True)
         self.brand.setFont(brand_font)
         side.addWidget(self.brand)
+        self.privacy_indicator = AppButton('AI & Models')
+        self.privacy_indicator.clicked.connect(self.ai_runtime_requested)
+        side.addWidget(self.privacy_indicator)
         side.addSpacing(SPACING['xl'])
         self.nav_buttons = {}
         for page in PAGES:
@@ -148,6 +154,7 @@ class MainWindow(QMainWindow):
                 widget.update_check_requested.connect(self.update_check_requested)
                 widget.onboarding_requested.connect(self.onboarding_requested)
                 widget.memory_rebuild_requested.connect(self.memory_rebuild_requested)
+                widget.ai_runtime_requested.connect(self.ai_runtime_requested)
                 self.launch_buttons[page] = widget.edit_button
             elif page == 'extensions' and extension_service is not None:
                 widget = ExtensionsPage(extension_service)
@@ -159,6 +166,11 @@ class MainWindow(QMainWindow):
         self.toast = ToastManager(root)
         self.open_page('home')
         self._update_navigation()
+        self.set_privacy_state(bool(config and config.private_mode))
+
+    def set_privacy_state(self, private):
+        self.privacy_indicator.setText('PRIVATE MODE · Local' if private else 'AI & Models')
+        self.privacy_indicator.setToolTip('Local processing; external network operations blocked.' if private else 'Configure AI execution and privacy.')
 
     def _scroll_page(self):
         scroll = QScrollArea()
@@ -244,6 +256,8 @@ class MainWindow(QMainWindow):
         if page not in self.pages:
             raise ValueError('Unknown page.')
         self.current_page = page
+        from src.observability.performance import emit
+        emit('feature_visited', component='ui', properties={'feature': page})
         widget = self.pages[page]
         if page == 'home':
             self._refresh_home()
@@ -267,3 +281,13 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_navigation()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_visibility_recorded', False):
+            self._visibility_recorded = True
+            from src.observability.performance import emit
+            import time
+            emit('operation_completed', component='ui', success=True,
+                 duration_ms=(time.perf_counter() - self._constructed_at) * 1000,
+                 properties={'operation': 'window_visible'})

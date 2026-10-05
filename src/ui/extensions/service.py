@@ -9,6 +9,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMessageBox
 from src.mcp.client.manager import MCPClientManager
 from src.mcp.bridge.tools import register_actions
+from src.network_policy import get_network_policy
 
 
 class ExtensionService(QObject):
@@ -20,11 +21,12 @@ class ExtensionService(QObject):
     browser_requested = Signal(object)
     interaction_requested = Signal(object)
 
-    def __init__(self, storage, credentials=None, parent=None):
+    def __init__(self, storage, credentials=None, parent=None, *, execution_journal=None, crash_reporter=None):
         super().__init__(parent)
         self.storage, self.credentials = storage, credentials
         self.manager = MCPClientManager(storage, credentials, on_event=self.state_changed.emit,
-            open_browser=self.open_authorization, interaction_handler=self.interact)
+            open_browser=self.open_authorization, interaction_handler=self.interact,
+            execution_journal=execution_journal, crash_reporter=crash_reporter)
         self.state_changed.connect(self.register, Qt.ConnectionType.QueuedConnection)
         self.approval_requested.connect(self._approval, Qt.ConnectionType.QueuedConnection)
         self.browser_requested.connect(self._browser, Qt.ConnectionType.QueuedConnection)
@@ -37,10 +39,14 @@ class ExtensionService(QObject):
     async def interact(self, request):
         if self.approval_parent is None or self.shutting_down:
             return {'action': 'cancel'}
+        if request.get('mode') == 'url' and not get_network_policy().is_request_allowed(request.get('url'), 'oauth'):
+            return {'action': 'cancel'}
         future = Future()
         self.interaction_requested.emit((request, future))
         try:
-            return await asyncio.wait_for(asyncio.wrap_future(future), 60)
+            from src.observability.performance import trace
+            with trace('mcp_interaction', 'mcp'):
+                return await asyncio.wait_for(asyncio.wrap_future(future), 60)
         except TimeoutError:
             return {'action': 'cancel'}
 
@@ -48,6 +54,9 @@ class ExtensionService(QObject):
     def _interaction(self, item):
         request, future = item
         if future.done():
+            return
+        if request.get('mode') == 'url' and not get_network_policy().is_request_allowed(request.get('url'), 'oauth'):
+            future.set_result({'action': 'cancel'})
             return
         response = {'action': 'cancel'}
         if self.approval_parent is not None and not self.shutting_down and self._active_dialog is None:
@@ -89,6 +98,7 @@ class ExtensionService(QObject):
             from src.mcp.client.oauth import browser_url
             try:
                 browser_url(request['url'])
+                get_network_policy().require_allowed(request['url'], 'oauth')
                 endpoint = urlsplit(request['url'])
                 box = QMessageBox(self.approval_parent)
                 self._active_dialog = box
@@ -100,9 +110,11 @@ class ExtensionService(QObject):
                 box.setDefaultButton(QMessageBox.StandardButton.No)
                 timer = QTimer(box)
                 timer.setInterval(100)
-                timer.timeout.connect(lambda: box.reject() if future.done() or self.shutting_down else None)
+                timer.timeout.connect(lambda: box.reject() if future.done() or self.shutting_down or
+                    not get_network_policy().is_request_allowed(request['url'], 'oauth') else None)
                 timer.start()
                 if box.exec() == QMessageBox.StandardButton.Yes and not future.done():
+                    get_network_policy().require_allowed(request['url'], 'oauth')
                     accepted = QDesktopServices.openUrl(QUrl(request['url']))
             except ValueError:
                 accepted = False
