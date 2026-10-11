@@ -127,3 +127,23 @@ python main.py --smoke-test
 - Phase 11 now includes client OAuth/elicitation, notifications/templates, a disabled-by-default SnapFlow server, controlled Workflow preview/execution and trusted SDK interfaces. Source/frozen evidence and remaining release limits are recorded in [the implementation report](docs/PHASE11_IMPLEMENTATION.md). See [client instructions](docs/extensions/MCP_CLIENT.md), [server setup](docs/extensions/MCP_SERVER.md), and [trusted development interfaces](docs/extensions/SNAPFLOW_EXTENSION_SDK.md).
 - Visual Memory now has optional local text embeddings alongside keyword search and optional text-only AI questions. Memory-to-Workflow reuse and retention controls are not added by Phase 12.
 - Phase 12 source functionality does not establish live local VLM, hardware-specific throughput/memory, frozen-build, installer/uninstaller or long-running performance qualification. See [the implementation record](docs/PHASE12_IMPLEMENTATION.md) for evidence and pending release checks.
+
+## Phase 14 Agent beta
+
+Agent Missions adds goal → structured plan → review → guided execution → verified report using existing Context, Memory, Skills, Workflows and reviewed MCP services. Enable **Agent Missions** in Settings → Beta Features, then open **Agent**. Plan Only runs planning without executing steps. Writes start off and always require specific approval. Private Mode and Safe Mode override plans; attempted effects are never automatically replayed after interruption.
+
+Configure new-mission defaults in Edit Settings → Agent. AI routing/fallback continues to follow AI & Models. Read [the Agent user guide](docs/USER_GUIDE.md#agent-missions-phase-14-beta), [architecture](docs/agent/AGENT_ARCHITECTURE.md), and [Phase 14 implementation evidence and qualification limits](docs/PHASE14_IMPLEMENTATION.md). Agent beta is off by default; synthetic checks do not establish live-model/provider or installed-release readiness.
+
+The pinned offline regression runner isolates test modules and denies external socket connections:
+
+```powershell
+.build-venv/Scripts/python.exe scripts/phase14_tests.py
+.build-venv/Scripts/python.exe scripts/verify_phase14.py --source
+.build-venv/Scripts/python.exe scripts/release_check.py --agent
+```
+
+## Phase 15 Desktop Context
+
+Permission-controlled Windows app/window metadata, read-only bounded UI Automation and selected text now feed the existing Context Assistant and Agent. Clipboard requires explicit consent and defaults to disabled. Filtered source preview/removal, temporary Agent plans/results, Private/Safe Mode boundaries and visibly stoppable local Assistance Sessions preserve the existing approval model. No desktop input automation or background screenshot history is introduced.
+
+See [Phase 15 implementation/evidence](docs/PHASE15_FINAL_REPORT.md), [architecture](docs/desktop/DESKTOP_CONTEXT_ARCHITECTURE.md), [privacy](docs/desktop/PRIVACY_MODEL.md) and [Assistance Sessions](docs/desktop/PROACTIVE_ASSISTANCE.md). Qualification status and remaining manual/release gates are recorded in the Phase 15 final report; earlier regression evidence is retained rather than rerun.
