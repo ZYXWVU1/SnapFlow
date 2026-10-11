@@ -4,6 +4,7 @@ import logging
 import os
 import time
 import threading
+from contextlib import contextmanager
 import httpx
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
@@ -95,6 +96,15 @@ class LLMClient:
         self.config = config
         self._local_runtime = None
 
+    @contextmanager
+    def inference_scope(self, callback):
+        previous = getattr(self._request_scope, 'before_inference', None)
+        self._request_scope.before_inference = callback
+        try:
+            yield self
+        finally:
+            self._request_scope.before_inference = previous
+
     def routing_metadata(self, skill):
         definition = getattr(skill, 'definition', None)
         return {'skill_id': skill.id, 'definition_snapshot': definition.to_dict() if definition else None}
@@ -119,7 +129,8 @@ class LLMClient:
                 cloud_model_version=config.ai_model_version, hardware_profile_id=data.get('hardware_profile_id'))
             data.update(evidence)
         data.pop('definition_snapshot', None)
-        request = replace(request, metadata=data)
+        request = replace(request, metadata=data,
+            before_inference=getattr(self._request_scope, 'before_inference', None))
         if config.local_ai_model:
             if self._local_runtime is None:
                 caps = ModelCapabilities(text=True, vision=config.local_ai_vision,

@@ -3,6 +3,26 @@ from src.context.models import SCOPES
 
 
 class ContextPermissionService:
+    def __init__(self, desktop_validator=None):
+        self.desktop_validator = desktop_validator
+
+    def select_desktop_sources(self, session, sources):
+        from src.context.models import ContextSource
+        from src.desktop_context.snapshot import DESKTOP_TYPES
+        sources = tuple(sources)
+        if len(sources) > 4 or any(not isinstance(s, ContextSource) or s.source_type not in DESKTOP_TYPES or
+                not s.resource_uri or s.memory_id or s.connection_id or len(s.content) > 3000 for s in sources):
+            raise ValueError('Select at most four bounded Desktop Context sources.')
+        if len({s.source_type for s in sources}) != len(sources):
+            raise ValueError('Duplicate Desktop Context sources.')
+        if sources and self.desktop_validator is None:
+            raise ValueError('Desktop Context requires live permission and freshness validation.')
+        if self.desktop_validator:
+            self.desktop_validator(sources)
+        session.desktop_sources = sources
+        session.permission_version += 1
+        session.history.clear()
+
     def select_external_prompt(self, session, text):
         if not isinstance(text, str) or len(text.encode('utf-8')) > 16000:
             raise ValueError('External prompt exceeds its size limit.')
@@ -50,6 +70,7 @@ class ContextPermissionService:
         session.history.clear()
         session.external_sources = ()
         session.external_prompt = ''
+        session.desktop_sources = ()
 
     def exclude_source(self, session, memory_id):
         if session.scope == 'selected_memories':
@@ -80,6 +101,12 @@ class ContextPermissionService:
         return True
 
     def validate_request(self, session, request):
+        if request.desktop_sources and self.desktop_validator is None:
+            raise ValueError('Desktop Context requires a live validator.')
+        if request.desktop_sources != session.desktop_sources:
+            raise ValueError('Desktop Context selection changed.')
+        if self.desktop_validator:
+            self.desktop_validator(request.desktop_sources)
         if request.external_sources != session.external_sources or request.external_prompt != session.external_prompt:
             raise ValueError('Only explicitly selected MCP resources are authorized.')
         if (request.session_id != session.session_id or

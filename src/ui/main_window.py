@@ -11,13 +11,14 @@ from src.ui.pages.skills import SkillsPage
 from src.ui.pages.workflows import WorkflowsPage
 from src.ui.pages.history import HistoryPage
 from src.ui.pages.memory import MemoryPage
+from src.ui.agent.page import AgentPage
 from src.ui.pages.settings import SettingsPage
 from src.ui.integrations.integration_page import IntegrationPage
 from src.ui.evaluation.page import EvaluationPage
 from src.ui.extensions.extensions_page import ExtensionsPage
 
 
-PAGES = ('home', 'memory', 'skills', 'workflows', 'integrations', 'extensions', 'evaluation', 'history', 'settings')
+PAGES = ('home', 'agent', 'memory', 'skills', 'workflows', 'integrations', 'extensions', 'evaluation', 'history', 'settings')
 _PAGE_COPY = {
     'memory': ('Visual Memory', 'Search information you explicitly saved.', None),
     'skills': ('Visual Skills', 'Teach AI to recognize the screenshots that matter to you.', 'Open Visual Skills'),
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
     update_check_requested = Signal()
     onboarding_requested = Signal()
     memory_open_requested = Signal(str)
+    agent_from_memory_requested = Signal(str)
     memory_ask_requested = Signal(str, object)
     memory_rebuild_requested = Signal()
     ai_runtime_requested = Signal()
@@ -95,7 +97,7 @@ class MainWindow(QMainWindow):
         for page in PAGES:
             name = page.title()
             button = QToolButton()
-            button.setIcon(icon(page))
+            button.setIcon(icon('workflows' if page == 'agent' else page))
             button.setText(name)
             button.setAccessibleName(name)
             button.setToolTip(name)
@@ -114,9 +116,12 @@ class MainWindow(QMainWindow):
         for page in PAGES:
             if page == 'home':
                 widget = self._build_home(hotkey)
+            elif page == 'agent':
+                widget = AgentPage(memory_store)
             elif page == 'memory' and memory_store is not None:
                 widget = MemoryPage(memory_store)
                 widget.memory_open_requested.connect(self.memory_open_requested)
+                widget.agent_requested.connect(self.agent_from_memory_requested)
                 widget.ask_requested.connect(self.memory_ask_requested)
                 widget.capture_requested.connect(self.capture_requested)
             elif page == 'skills':
@@ -169,6 +174,7 @@ class MainWindow(QMainWindow):
         self.set_privacy_state(bool(config and config.private_mode))
 
     def set_privacy_state(self, private):
+        self.pages['agent'].set_privacy_state(private)
         self.privacy_indicator.setText('PRIVATE MODE · Local' if private else 'AI & Models')
         self.privacy_indicator.setToolTip('Local processing; external network operations blocked.' if private else 'Configure AI execution and privacy.')
 

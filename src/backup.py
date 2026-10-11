@@ -37,6 +37,7 @@ _FIXED_MEMBERS = {
     "integrations/integrations.json": "integrations",
     "integrations/mcp_connections.json": "integrations",
     "databases/learning.sqlite3": "evaluation",
+    "databases/agent_missions.sqlite3": "agent",
 }
 _CATEGORY_TARGETS = {
     "settings": ("config_file", "model_records_file", "beta_features_file"),
@@ -44,6 +45,7 @@ _CATEGORY_TARGETS = {
     "workflows": ("workflows_file", "workflow_history_file"),
     "integrations": ("integrations_file", "mcp_connections_file"),
     "evaluation": ("learning_database",),
+    "agent": ("agent_database",),
     "examples": ("verified_images_dir",),
     "memory": ("memory_images_dir",),
 }
@@ -103,6 +105,7 @@ class BackupService:
             ("integrations", "integrations/integrations.json", self.paths.integrations_file, "file"),
             ("integrations", "integrations/mcp_connections.json", self.paths.mcp_connections_file, "file"),
             ("evaluation", "databases/learning.sqlite3", self.paths.learning_database, "sqlite"),
+            ("agent", "databases/agent_missions.sqlite3", self.paths.agent_database, "agent_sqlite"),
         )
         for category, member, source, kind in fixed_sources:
             if not source.exists():
@@ -112,6 +115,8 @@ class BackupService:
             payload = source
             if kind == "sqlite":
                 payload = backup_sqlite_database(source, temporary_root / "learning.sqlite3")
+            elif kind == "agent_sqlite":
+                payload = _backup_agent_database(source, temporary_root / 'agent_missions.sqlite3')
             items.append((category, member, payload))
 
         image_dir = self.paths.verified_images_dir
@@ -152,6 +157,7 @@ class BackupService:
             self.paths.workflow_history_file,
             self.paths.integrations_file,
             self.paths.learning_database,
+            self.paths.agent_database,
             self.paths.legacy_data_dir / "custom_skills.json",
             self.paths.legacy_data_dir / "workflows.json",
             self.paths.legacy_data_dir / "workflow_history.json",
@@ -333,6 +339,11 @@ class BackupService:
                     finally:
                         connection.close()
 
+                agent_stage = stage_root / 'databases' / 'agent_missions.sqlite3'
+                if agent_stage.exists():
+                    _validate_agent_database(agent_stage)
+                    _sanitize_agent_database(agent_stage)
+
                 return BackupInspection(app_version, created_at, tuple(sorted(categories)),
                                         len(records), total)
         except BackupError:
@@ -442,6 +453,8 @@ class BackupService:
             return self.paths.integrations_file
         if member == "databases/learning.sqlite3":
             return self.paths.learning_database
+        if member == 'databases/agent_missions.sqlite3':
+            return self.paths.agent_database
         if _safe_member_category(member) == "examples":
             return self.paths.verified_images_dir.joinpath(*PurePosixPath(member).parts[2:])
         if _safe_member_category(member) == 'memory':
@@ -450,9 +463,9 @@ class BackupService:
 
     def _category_targets(self, category):
         targets = [getattr(self.paths, name) for name in _CATEGORY_TARGETS[category]]
-        if category == "evaluation":
-            database = self.paths.learning_database
-            targets.extend((Path(str(database) + "-wal"), Path(str(database) + "-shm")))
+        if category in ('evaluation', 'agent'):
+            database = self.paths.learning_database if category == 'evaluation' else self.paths.agent_database
+            targets.extend(Path(str(database) + suffix) for suffix in ('-wal', '-shm', '-journal'))
         return targets
 
     @staticmethod
@@ -557,6 +570,192 @@ class BackupService:
             except OSError:
                 continue
         return total
+
+
+_AGENT_TABLES = {
+    'sessions': 'CREATE TABLE sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL, owner TEXT, locked INTEGER NOT NULL DEFAULT 0)',
+    'plans': 'CREATE TABLE plans (id TEXT PRIMARY KEY, session TEXT NOT NULL, version INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(session, version))',
+    'steps': 'CREATE TABLE steps (plan TEXT NOT NULL, id TEXT NOT NULL, status TEXT NOT NULL, attempted INTEGER NOT NULL DEFAULT 0, output TEXT, evidence TEXT, invocation TEXT, PRIMARY KEY(plan,id))',
+    'approvals': 'CREATE TABLE approvals (plan TEXT NOT NULL, step TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(plan,step))',
+    'contexts': 'CREATE TABLE contexts (session TEXT PRIMARY KEY, payload TEXT NOT NULL)',
+    'budgets': 'CREATE TABLE budgets (session TEXT PRIMARY KEY, ai_calls INTEGER NOT NULL DEFAULT 0, writes INTEGER NOT NULL DEFAULT 0, replans INTEGER NOT NULL DEFAULT 0)',
+}
+_AGENT_SECRET_KEYS = frozenset(('token', 'tokens', 'access_token', 'refresh_token', 'api_key',
+    'apikey', 'password', 'secret', 'client_secret', 'credentials', 'credential', 'authorization',
+    'bearer_token', 'runtime_secrets', 'temporary_secrets'))
+
+
+def _agent_secret_key(key):
+    return key.lower().replace('-', '_').replace(' ', '_') in _AGENT_SECRET_KEYS
+
+
+def _agent_without_secrets(value, *, reject=False):
+    if isinstance(value, dict):
+        if reject and any(_agent_secret_key(key) for key in value):
+            raise BackupError('Agent immutable definitions contain credential fields; remove them before backup.')
+        return {key: _agent_without_secrets(item, reject=reject) for key, item in value.items()
+                if not _agent_secret_key(key)}
+    if isinstance(value, list):
+        return [_agent_without_secrets(item, reject=reject) for item in value]
+    return value
+
+
+def _agent_json(raw, *, reject_secrets=True):
+    from src.agent.models import canonical, snapshot
+    if type(raw) is not str or len(raw.encode('utf-8')) > 262144:
+        raise BackupError('Agent record is invalid or oversized.')
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('Duplicate Agent JSON field.')
+            result[key] = value
+        return result
+    value = json.loads(raw, object_pairs_hook=unique_pairs)
+    canonical(snapshot(value))
+    _agent_without_secrets(value, reject=reject_secrets)
+    return value
+
+
+def _validate_agent_database(path, *, exported=True):
+    """Inspect inert rows only; never instantiate services or execute tool text."""
+    from src.agent.models import AgentPlan, AgentSession, STEP_STATUSES, identifier
+    from src.agent.bindings import references
+    if Path(path).stat().st_size > 32 * 1024 * 1024:
+        raise BackupError('Agent history exceeds its storage limit.')
+    db = sqlite3.connect(Path(path).absolute().as_uri() + '?mode=ro', uri=True)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute('PRAGMA trusted_schema=OFF')
+        if db.execute('PRAGMA user_version').fetchone()[0] != 1 or db.execute('PRAGMA integrity_check(1)').fetchone()[0] != 'ok':
+            raise BackupError('Agent database version or integrity is invalid.')
+        objects = db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master').fetchall()
+        tables = {row['name']: row['sql'] for row in objects if row['type'] == 'table'}
+        normalize = lambda sql: re.sub(r'\s+', '', sql.lower().replace('if not exists ', ''))
+        if set(tables) != set(_AGENT_TABLES) or any(normalize(tables[name]) != normalize(sql) for name, sql in _AGENT_TABLES.items()):
+            raise BackupError('Agent database has an unrecognized table schema.')
+        expected_indexes = {f'sqlite_autoindex_{name}_{index}' for name in _AGENT_TABLES
+                            for index in range(1, 3 if name == 'plans' else 2)}
+        indexes = [row for row in objects if row['type'] == 'index']
+        if (len(objects) != len(tables) + len(indexes) or
+                {row['name'] for row in indexes} != expected_indexes or any(row['sql'] is not None for row in indexes)):
+            raise BackupError('Agent backup contains unsupported SQL objects.')
+        if any(db.execute(f'SELECT count(*) FROM {table}').fetchone()[0] > limit
+               for table, limit in (('sessions', 500), ('plans', 50000), ('steps', 2500000),
+                                   ('approvals', 2500000), ('contexts', 500), ('budgets', 500))):
+            raise BackupError('Agent database contains too many records.')
+        sessions = {}
+        for row in db.execute('SELECT * FROM sessions'):
+            raw = _agent_json(row['payload'])
+            session = AgentSession.from_dict(raw)
+            if set(raw) != set(session.to_dict()) or row['id'] != session.session_id or row['locked'] not in (0, 1):
+                raise BackupError('Agent session identity or state is invalid.')
+            for stamp in (session.created_at, session.updated_at):
+                if datetime.fromisoformat(stamp).tzinfo is None:
+                    raise BackupError('Agent timestamps must contain a timezone.')
+            if row['owner'] is not None:
+                identifier(row['owner'])
+            sessions[row['id']] = session
+        plans, expected_steps = {}, set()
+        for row in db.execute('SELECT * FROM plans ORDER BY session,version'):
+            raw = _agent_json(row['payload'])
+            plan = AgentPlan.from_dict(raw)
+            if (set(raw) != set(plan.to_dict()) or plan.plan_id != row['id'] or plan.session_id != row['session'] or
+                    plan.version != row['version'] or plan.session_id not in sessions):
+                raise BackupError('Agent plan identity is invalid.')
+            previous = [p for p in plans.values() if p.session_id == plan.session_id]
+            if plan.version != len(previous) + 1 or plan.supersedes_plan_id != (previous[-1].plan_id if previous else None):
+                raise BackupError('Agent plan version chain is invalid.')
+            if datetime.fromisoformat(plan.created_at).tzinfo is None:
+                raise BackupError('Agent plan timestamp is invalid.')
+            preceding, ancestry = set(), {}
+            for order, step in enumerate(plan.steps, 1):
+                if (step.step_id in preceding or step.order != order or len(set(step.dependencies)) != len(step.dependencies)
+                        or not set(step.dependencies) <= preceding):
+                    raise BackupError('Agent plan dependency structure is invalid.')
+                ancestry[step.step_id] = set(step.dependencies)
+                for dependency in step.dependencies:
+                    ancestry[step.step_id].update(ancestry[dependency])
+                if any(ref not in ancestry[step.step_id] for ref, _ in references(step.input_bindings)):
+                    raise BackupError('Agent plan input reference is invalid.')
+                preceding.add(step.step_id)
+                expected_steps.add((plan.plan_id, step.step_id))
+            plans[plan.plan_id] = plan
+        for session in sessions.values():
+            owned = [p for p in plans.values() if p.session_id == session.session_id]
+            if session.current_plan_id != (owned[-1].plan_id if owned else None):
+                raise BackupError('Agent current plan reference is invalid.')
+        actual_steps = set()
+        for row in db.execute('SELECT * FROM steps'):
+            actual_steps.add((row['plan'], row['id']))
+            if row['status'] not in STEP_STATUSES or row['attempted'] not in (0, 1):
+                raise BackupError('Agent step state is invalid.')
+            for field in ('output', 'evidence'):
+                if row[field] is not None:
+                    _agent_json(row[field], reject_secrets=exported)
+            if row['invocation'] is not None:
+                identifier(row['invocation'])
+        if actual_steps != expected_steps:
+            raise BackupError('Agent step references do not match plan definitions.')
+        for row in db.execute('SELECT * FROM approvals'):
+            if exported or (row['plan'], row['step']) not in expected_steps or type(row['token']) is not str or len(row['token']) > 256:
+                raise BackupError('Agent backup must not contain approval grants.')
+        for row in db.execute('SELECT * FROM contexts'):
+            if row['session'] not in sessions or not isinstance(_agent_json(row['payload']), dict):
+                raise BackupError('Agent context reference is invalid.')
+        budget_sessions = set()
+        for row in db.execute('SELECT * FROM budgets'):
+            session = sessions.get(row['session'])
+            budget_sessions.add(row['session'])
+            if session is None or any(type(row[key]) is not int or not 0 <= row[key] <= maximum for key, maximum in
+                    (('ai_calls', session.constraints.max_ai_calls), ('writes', session.constraints.max_external_writes),
+                     ('replans', session.constraints.max_replans))):
+                raise BackupError('Agent budget history is invalid.')
+        if budget_sessions != set(sessions):
+            raise BackupError('Agent budget history is incomplete.')
+    except (ValueError, TypeError, KeyError, RecursionError, sqlite3.Error) as exc:
+        raise BackupError('Agent backup contains invalid mission data.') from exc
+    finally:
+        db.close()
+
+
+def _sanitize_agent_database(path):
+    from src.agent.models import canonical
+    db = sqlite3.connect(path)
+    try:
+        db.execute('PRAGMA secure_delete=ON')
+        db.execute('DELETE FROM approvals')
+        for sid, payload, locked in db.execute('SELECT id,payload,locked FROM sessions').fetchall():
+            raw = _agent_json(payload)
+            if locked or raw['status'] in ('running', 'planning', 'replanning'):
+                raw['status'] = 'interrupted'
+            raw['active'] = False
+            db.execute('UPDATE sessions SET payload=?,owner=NULL,locked=0 WHERE id=?', (canonical(raw), sid))
+        db.execute("UPDATE steps SET status='interrupted' WHERE status='running'")
+        for plan, sid, output, evidence in db.execute('SELECT plan,id,output,evidence FROM steps').fetchall():
+            values = [canonical(_agent_without_secrets(_agent_json(raw, reject_secrets=False)))
+                      if raw is not None else None for raw in (output, evidence)]
+            db.execute('UPDATE steps SET output=?,evidence=? WHERE plan=? AND id=?', (*values, plan, sid))
+        db.commit()
+        # Deleted grants/secrets must not remain in SQLite free pages.
+        db.execute('VACUUM')
+    finally:
+        db.close()
+
+
+def _backup_agent_database(source, destination):
+    # This database has its own schema, separate from learning DB migrations.
+    source_db = sqlite3.connect(Path(source).absolute().as_uri() + '?mode=ro', uri=True)
+    destination_db = sqlite3.connect(destination)
+    try:
+        source_db.backup(destination_db)
+    finally:
+        destination_db.close()
+        source_db.close()
+    _validate_agent_database(destination, exported=False)
+    _sanitize_agent_database(destination)
+    _validate_agent_database(destination)
+    return destination
 
 
 def _validate_local_model_registry(data):

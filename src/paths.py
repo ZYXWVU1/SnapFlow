@@ -155,6 +155,11 @@ class AppPaths:
         return self.data_dir / 'recovery.sqlite3'
 
     @property
+    def agent_database(self):
+        """User-owned mission history; resolving the path creates no database."""
+        return self.data_dir / 'agent_missions.sqlite3'
+
+    @property
     def verified_images_dir(self):
         return self.data_dir / "verified_images"
 

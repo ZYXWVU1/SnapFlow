@@ -51,6 +51,7 @@ class _SemanticSearchWorker(QRunnable):
 
 class MemoryPage(ScrollPage):
     memory_open_requested = Signal(str)
+    agent_requested = Signal(str)
     capture_requested = Signal()
     ask_requested = Signal(str, object)
 
@@ -125,6 +126,9 @@ class MemoryPage(ScrollPage):
         self.open_button = AppButton('Open', variant='secondary')
         self.open_button.clicked.connect(self._open_selected)
         results_card.content.addWidget(self.open_button)
+        self.agent_button = AppButton('Start Agent Task with Selected Memory', variant='secondary')
+        self.agent_button.clicked.connect(self._start_agent)
+        results_card.content.addWidget(self.agent_button)
         navigation = QHBoxLayout()
         self.previous_button = AppButton('Previous')
         self.next_button = AppButton('Next')
@@ -327,6 +331,11 @@ class MemoryPage(ScrollPage):
         item = self.results.currentItem() or self.results.item(0)
         if item:
             self._open_item(item)
+
+    def _start_agent(self):
+        item = self.results.currentItem()
+        if item:
+            self.agent_requested.emit(item.data(Qt.ItemDataRole.UserRole))
 
     def next_page(self):
         if self.next_button.isEnabled():

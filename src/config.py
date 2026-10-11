@@ -5,7 +5,7 @@ import os
 import shutil
 from datetime import datetime, timezone
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -71,8 +71,35 @@ class Config:
     local_embedding_model: str | None = None
     local_embedding_dimension: int = 0
     local_embedding_version: str = '1'
+    agent_default_mode: str = 'guided'
+    agent_max_steps: int = 10
+    agent_max_ai_calls: int = 5
+    agent_max_external_writes: int = 1
+    agent_max_runtime_minutes: int = 10
+    agent_allow_memory_search: bool = False
+    agent_allow_mcp_tools: bool = False
+    desktop_metadata_enabled: bool = True
+    desktop_ui_policy: str = 'disabled'
+    desktop_selection_policy: str = 'disabled'
+    desktop_clipboard_policy: str = 'disabled'
+    desktop_blocked_apps: tuple[str, ...] = ()
+    desktop_app_policies: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        from src.desktop_context.permissions import validate_preferences
+        validate_preferences(self.desktop_metadata_enabled, self.desktop_ui_policy,
+            self.desktop_selection_policy, self.desktop_clipboard_policy,
+            self.desktop_blocked_apps, self.desktop_app_policies)
+        object.__setattr__(self, 'desktop_blocked_apps', tuple(self.desktop_blocked_apps))
+        if self.agent_default_mode not in ('guided', 'plan_only'):
+            raise ValueError('Agent mode must be Guided or Plan Only.')
+        for name, low, high in (('agent_max_steps', 1, 50), ('agent_max_ai_calls', 0, 50),
+                               ('agent_max_external_writes', 0, 10), ('agent_max_runtime_minutes', 1, 60)):
+            if type(getattr(self, name)) is not int or not low <= getattr(self, name) <= high:
+                raise ValueError('Invalid Agent default budget.')
+        for name in ('agent_allow_memory_search', 'agent_allow_mcp_tools'):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError('Agent permissions must be true or false.')
         if self.update_channel not in ('stable', 'beta', 'dev'):
             raise ValueError('Unknown update channel.')
         if self.ai_execution_mode not in ('automatic', 'prefer_local', 'local_only', 'cloud_only', 'ask_every_time'):

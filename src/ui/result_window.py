@@ -29,6 +29,7 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
     save_example_requested = Signal()
     save_to_memory_requested = Signal()
     context_requested = Signal()
+    agent_requested = Signal()
     calendar_event_requested = Signal(object)
 
     def __init__(self, mode: str, always_on_top: bool) -> None:
@@ -133,8 +134,10 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         buttons = QHBoxLayout()
         self.copy = AppButton("Copy")
         self.again = AppButton("Ask Again", variant='primary')
+        self.agent_button = AppButton('Start Agent Task', variant='secondary')
+        self.agent_button.clicked.connect(self.agent_requested)
         close = AppButton("Close", variant='ghost')
-        for button in (self.copy, self.again, close):
+        for button in (self.copy, self.again, self.agent_button, close):
             buttons.addWidget(button)
         layout.addLayout(buttons)
         self.copy.clicked.connect(lambda: QApplication.clipboard().setText(self.text.toPlainText()))

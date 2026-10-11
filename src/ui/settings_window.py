@@ -15,6 +15,7 @@ from src.ui.focus_aware_window import FocusAwareTopmostMixin
 class SettingsWindow(FocusAwareTopmostMixin, QDialog):
     submitted = Signal(object, str)
     remove_key_requested = Signal()
+    agent_beta_requested = Signal()
 
     def __init__(self, config: Config, parent=None, *, api_key_configured=None, api_key_stored=False) -> None:
         super().__init__(parent)
@@ -118,6 +119,40 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
         context_note.setProperty('role', 'muted')
         context.content.addWidget(context_note)
         body.addWidget(context)
+        agent = Card()
+        agent.content.addWidget(QLabel('Agent'))
+        self.agent_beta_button = AppButton('Enable or Disable Agent Beta')
+        self.agent_beta_button.clicked.connect(self.agent_beta_requested)
+        agent.content.addWidget(self.agent_beta_button)
+        agent_form = QFormLayout()
+        self.agent_default_mode = QComboBox()
+        self.agent_default_mode.addItem('Guided execution', 'guided')
+        self.agent_default_mode.addItem('Plan only', 'plan_only')
+        self.agent_default_mode.setCurrentIndex(self.agent_default_mode.findData(config.agent_default_mode))
+        agent_form.addRow('Default mode', self.agent_default_mode)
+        self.agent_limits = {}
+        for name, label, low, high in (('agent_max_steps', 'Maximum steps', 1, 50),
+                ('agent_max_ai_calls', 'Maximum AI calls', 0, 50),
+                ('agent_max_external_writes', 'Maximum external writes', 0, 10),
+                ('agent_max_runtime_minutes', 'Maximum active minutes', 1, 60)):
+            control = QSpinBox()
+            control.setRange(low, high)
+            control.setValue(getattr(config, name))
+            self.agent_limits[name] = control
+            agent_form.addRow(label, control)
+        agent.content.addLayout(agent_form)
+        self.agent_allow_memory_search = QCheckBox('Allow Memory search in new missions')
+        self.agent_allow_memory_search.setChecked(config.agent_allow_memory_search)
+        self.agent_allow_mcp_tools = QCheckBox('Allow remote MCP proposals in new missions')
+        self.agent_allow_mcp_tools.setChecked(config.agent_allow_mcp_tools)
+        agent.content.addWidget(self.agent_allow_memory_search)
+        agent.content.addWidget(self.agent_allow_mcp_tools)
+        note = QLabel('Local and external writes always require approval. New missions start with writes off. '
+            'Cloud routing and fallback follow AI & Models settings; Private Mode takes precedence. '
+            'Changing defaults does not approve an existing plan.')
+        note.setWordWrap(True)
+        agent.content.addWidget(note)
+        body.addWidget(agent)
         diagnostics = Card()
         diagnostics.content.addWidget(QLabel('Privacy & Diagnostics'))
         self.local_observability_enabled = QCheckBox('Keep local reliability records')
@@ -160,6 +195,12 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
         appearance_form.addRow('Theme', self.theme)
         self.appearance_card.content.addLayout(appearance_form)
         body.addWidget(self.appearance_card)
+        from src.ui.context.context_permission_dialog import DesktopPolicyWidget
+        desktop_card = Card()
+        desktop_card.content.addWidget(QLabel('Desktop Context · Temporary'))
+        self.desktop_policy = DesktopPolicyWidget(config)
+        desktop_card.content.addWidget(self.desktop_policy)
+        body.addWidget(desktop_card)
         about = Card()
         about.content.addWidget(QLabel('About & Updates'))
         about.content.addWidget(QLabel(f'{APP_NAME} {APP_VERSION}'))
@@ -210,7 +251,12 @@ class SettingsWindow(FocusAwareTopmostMixin, QDialog):
                 contextual_assistant_enabled=self.contextual_assistant_enabled.isChecked(),
                 context_memory_search_enabled=self.context_memory_search_enabled.isChecked(),
                 local_observability_enabled=self.local_observability_enabled.isChecked(),
-                local_crash_reports_enabled=self.local_crash_reports_enabled.isChecked())
+                local_crash_reports_enabled=self.local_crash_reports_enabled.isChecked(),
+                agent_default_mode=self.agent_default_mode.currentData(),
+                agent_allow_memory_search=self.agent_allow_memory_search.isChecked(),
+                agent_allow_mcp_tools=self.agent_allow_mcp_tools.isChecked(),
+                **{name: control.value() for name, control in self.agent_limits.items()},
+                **self.desktop_policy.values())
         except ValueError as exc:
             QMessageBox.warning(self, "Invalid settings", str(exc))
             return

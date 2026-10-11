@@ -24,6 +24,7 @@ build/
 dist/
 release/
 /.github/workflows/windows-build.yml
+/.github/workflows/phase13-release.yml
 /packaging/
 !/packaging/
 /packaging/*
@@ -49,27 +50,11 @@ release/
 !/scripts/phase13_profile.py
 !/scripts/verify_phase13_installer.py
 
-# Requested local-only folders and screenshots.
+# Local documentation, planning notes, and screenshots.
 /docs/
-!/docs/
-/docs/*
-!/docs/PHASE11_IMPLEMENTATION.md
-!/docs/PHASE12_IMPLEMENTATION.md
-!/docs/PHASE13_IMPLEMENTATION.md
-!/docs/PHASE13_FINAL_REPORT.md
-!/docs/OBSERVABILITY.md
-!/docs/PRIVACY_ANALYTICS.md
-!/docs/CRASH_RECOVERY.md
-!/docs/RELIABILITY.md
-!/docs/RELEASE_PROCESS.md
-!/docs/BETA_TESTING_GUIDE.md
-!/docs/BETA_KNOWN_ISSUES.md
-!/docs/CHANGELOG.md
-!/docs/USER_GUIDE.md
-!/docs/ai/
-!/docs/ai/*.md
-!/docs/extensions/
-!/docs/extensions/**
+/task_plan.md
+/findings.md
+/progress.md
 /assets/screenshots/
 
 # Local user data and temporary files.

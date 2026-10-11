@@ -3,7 +3,7 @@ import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import (QBoxLayout, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QBoxLayout, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QScrollArea, QTextBrowser, QVBoxLayout, QWidget)
 
 from src.ui.design.components import AppButton, Card, PageHeader
@@ -11,6 +11,7 @@ from src.ui.design.components import AppButton, Card, PageHeader
 
 class ContextAssistantDialog(QDialog):
     question_requested = Signal(str, str, object)
+    agent_requested = Signal(str)
     scope_changed = Signal(str)
     permission_revoked = Signal()
     clear_requested = Signal()
@@ -21,6 +22,8 @@ class ContextAssistantDialog(QDialog):
     cancel_requested = Signal()
     closed = Signal()
     external_source_removed = Signal(str, str)
+    desktop_context_requested = Signal()
+    desktop_selection_changed = Signal(bool)
 
     def __init__(self, store, parent=None, *, memory_enabled=True, memory_search_enabled=True):
         super().__init__(parent)
@@ -54,7 +57,7 @@ class ContextAssistantDialog(QDialog):
         scope_card = Card()
         scope_card.content.addWidget(QLabel('Context Sources'))
         self.scope = QComboBox()
-        self.scope.addItem('Current screenshot only', 'current_only')
+        self.scope.addItem('Current context only', 'current_only')
         if memory_enabled:
             self.scope.addItem('Current + selected memories', 'selected_memories')
             if memory_search_enabled:
@@ -66,6 +69,18 @@ class ContextAssistantDialog(QDialog):
         self.scope_note.setTextFormat(Qt.TextFormat.PlainText)
         scope_card.content.addWidget(self.scope_note)
         left_layout.addWidget(scope_card)
+        desktop_card = Card()
+        self.include_desktop = QCheckBox('Include reviewed Desktop Context')
+        self.include_desktop.toggled.connect(self.desktop_selection_changed)
+        desktop_card.content.addWidget(self.include_desktop)
+        self.desktop_summary = QLabel('No desktop sources selected.')
+        self.desktop_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.desktop_summary.setWordWrap(True)
+        desktop_card.content.addWidget(self.desktop_summary)
+        manage = AppButton('Manage Desktop Context', variant='secondary')
+        manage.clicked.connect(self.desktop_context_requested)
+        desktop_card.content.addWidget(manage)
+        left_layout.addWidget(desktop_card)
 
         self.memory_card = Card()
         self.memory_query = QLineEdit()
@@ -135,6 +150,9 @@ class ContextAssistantDialog(QDialog):
             controls.addWidget(button)
         outer.addLayout(controls)
         secondary_controls = QHBoxLayout()
+        self.agent_button = AppButton('Turn into Task', variant='secondary')
+        self.agent_button.clicked.connect(lambda: self.agent_requested.emit(self.question.text().strip()))
+        secondary_controls.addWidget(self.agent_button)
         for button in (clear, close):
             secondary_controls.addWidget(button)
         outer.addLayout(secondary_controls)
@@ -247,7 +265,9 @@ class ContextAssistantDialog(QDialog):
         self._clear_source_buttons()
         for source in result.sources:
             button = AppButton(f'[{source.source_id}] {source.title}', variant='secondary')
-            if source.source_type == 'mcp_resource':
+            if source.source_type.startswith('desktop_') or source.source_type in ('selected_text', 'clipboard'):
+                button.clicked.connect(self.desktop_context_requested)
+            elif source.source_type == 'mcp_resource':
                 button.clicked.connect(lambda checked=False, current=source: self.preview_external_source(current))
             elif source.memory_id:
                 button.clicked.connect(lambda checked=False, memory_id=source.memory_id:
@@ -262,6 +282,10 @@ class ContextAssistantDialog(QDialog):
                     control=remove: self._remove_source(memory_id, control))
                 self.source_layout.addWidget(remove)
                 self.source_remove_buttons.append(remove)
+
+    def set_desktop_sources(self, sources):
+        self.desktop_summary.setText('\n'.join(f'{s.title} · {len(s.content)} characters' for s in sources)
+            or 'No desktop sources selected.')
 
     def _remove_source(self, memory_id, control):
         self.selected.discard(memory_id)

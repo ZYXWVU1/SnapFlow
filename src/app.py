@@ -412,6 +412,13 @@ class ApplicationController(QObject):
         app.setWindowIcon(icon)
         self.tray = QSystemTrayIcon(icon, self)
         self.workflow_bridge = WorkflowBridge(self.tray, self.ask_about_result, self)
+        from src.ui.agent.controller import AgentController
+        from src.ui.context.desktop_controller import DesktopController
+        self.desktop_controller = DesktopController(self)
+        self.context_permissions.desktop_validator = self.desktop_controller.service.validate_sources
+        self.agent_controller = AgentController(self)
+        self.result.agent_requested.connect(self.open_agent)
+        self.main_window.agent_from_memory_requested.connect(lambda memory_id: self.open_agent(memory_id=memory_id))
         self.server_service.workflow_bridge = self.workflow_bridge
         self.server_service.start()
         self.tray.setToolTip(APP_NAME)
@@ -433,6 +440,9 @@ class ApplicationController(QObject):
         self.menu.addAction("Settings", self.open_settings)
         self.menu.addAction("Visual Skills", self.open_skills)
         self.menu.addAction("Visual Workflows", self.open_workflows)
+        self.menu.addAction('Desktop Context…', self.desktop_controller.show)
+        self.desktop_controller.session_action = self.menu.addAction('Start Desktop Assistance…', self.desktop_controller.request_start)
+        self.menu.addAction('Stop Desktop Assistance', self.desktop_controller.stop)
         self.menu.addSeparator()
         self.menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(self.menu)
@@ -482,6 +492,8 @@ class ApplicationController(QObject):
             crash_reporter=self.crash_reporter, resources=self.resource_snapshot, flags=self.beta_features)
 
     def refresh_beta_controls(self):
+        if getattr(self, 'agent_controller', None):
+            self.agent_controller.refresh_enabled()
         page = self.main_window.pages['settings']
         page.beta_insights_button.setEnabled(self.beta_features.enabled('beta_insights'))
         variant = self.beta_features.variant('feedback_wording', analytics_enabled=self.config.local_observability_enabled)
@@ -684,6 +696,19 @@ class ApplicationController(QObject):
         self.main_window.raise_()
         self.main_window.activateWindow()
 
+    def open_agent(self, goal='', *, memory_id=None) -> None:
+        self.main_window.open_page('agent')
+        page = self.main_window.pages['agent']
+        page.include_current.setChecked(self._current_context_data() is not None)
+        if isinstance(goal, str) and goal.strip():
+            page.goal.setText(goal)
+        if memory_id:
+            page.select_memory(memory_id)
+        self.agent_controller.refresh_enabled()
+        self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+
     def open_memory_record(self, memory_id: str) -> None:
         try:
             dialog = MemoryDetailDialog(self.memory_store, memory_id, self.main_window)
@@ -694,9 +719,9 @@ class ApplicationController(QObject):
         if dialog.changed:
             self.main_window.pages['memory'].refresh()
 
-    def open_context_assistant(self) -> None:
-        if (self.quitting or not self.config.contextual_assistant_enabled or not self.image_bytes or
-                not isinstance(self.last_result, (SkillResult, ModeResult))):
+    def open_context_assistant(self, *, desktop=False) -> None:
+        if (self.quitting or not self.config.contextual_assistant_enabled or
+                not desktop and (not self.image_bytes or not isinstance(self.last_result, (SkillResult, ModeResult)))):
             return
         if self.context_dialog is not None:
             self.context_dialog.show()
@@ -707,6 +732,7 @@ class ApplicationController(QObject):
             memory_enabled=self.config.visual_memory_enabled,
             memory_search_enabled=self.config.context_memory_search_enabled)
         dialog.question_requested.connect(self.submit_context_question)
+        dialog.agent_requested.connect(self.open_agent)
         dialog.scope_changed.connect(self.context_scope_changed)
         dialog.permission_revoked.connect(self.revoke_context_permission)
         dialog.clear_requested.connect(self.clear_context_session)
@@ -717,6 +743,8 @@ class ApplicationController(QObject):
         dialog.cancel_requested.connect(self.cancel_context_request)
         dialog.closed.connect(self.close_context_session)
         dialog.external_source_removed.connect(self.remove_mcp_context_resource)
+        dialog.desktop_context_requested.connect(self.desktop_controller.show)
+        dialog.desktop_selection_changed.connect(self.desktop_selection_changed)
         self.context_dialog = dialog
         dialog.show()
 
@@ -773,7 +801,7 @@ class ApplicationController(QObject):
 
     def submit_context_question(self, question: str, scope: str, memory_ids) -> None:
         session, dialog = self.context_session, self.context_dialog
-        if self.quitting or session is None or dialog is None or not self.image_bytes:
+        if self.quitting or session is None or dialog is None:
             return
         try:
             if scope == 'current_only':
@@ -792,14 +820,24 @@ class ApplicationController(QObject):
                     self.context_permissions.grant_search(session)
             else:
                 raise ValueError('Unknown context scope.')
+            desktop_sources = self.desktop_controller.sources() if dialog.include_desktop.isChecked() else ()
+            if desktop_sources != session.desktop_sources:
+                self.context_permissions.select_desktop_sources(session, desktop_sources)
+            current_data = self._current_context_data() if self.image_bytes else None
+            if not current_data and not desktop_sources:
+                raise ValueError('Analyze a screenshot or capture and select Desktop Context first.')
             request = ContextRequest.new(session, question,
-                current_skill_result=self._current_context_data())
+                current_skill_result=current_data or {'context_status': 'No screenshot selected. Use desktop sources only.'})
             self.context_permissions.validate_request(session, request)
         except ValueError as exc:
             dialog.show_error(str(exc))
             return
-        worker = ContextWorker(ContextController(self.memory_store, self.client.scoped(
-            lambda: self.quitting or self.context_latest_request != request.request_id),
+        def request_cancelled():
+            if self.quitting or self.context_latest_request != request.request_id:
+                return True
+            self.context_permissions.validate_request(session, request)
+            return False
+        worker = ContextWorker(ContextController(self.memory_store, self.client.scoped(request_cancelled),
             self.context_permissions), session, request)
         worker.signals.finished.connect(self.context_finished)
         self.context_workers[request.request_id] = worker
@@ -808,6 +846,13 @@ class ApplicationController(QObject):
         dialog.show_suggestions(())
         dialog.set_busy(question)
         self.context_pool.start(worker)
+
+    def desktop_selection_changed(self, checked):
+        if self.context_session is not None:
+            self.context_permissions.select_desktop_sources(self.context_session, ())
+            self.context_latest_request = None
+            if self.context_dialog and self.context_dialog._busy:
+                self.context_dialog.show_error('Desktop Context selection changed. Review sources and ask again.')
 
     @Slot(str, object, str)
     def context_finished(self, request_id, result, error):
@@ -1201,6 +1246,8 @@ class ApplicationController(QObject):
     def begin_selection(self) -> None:
         if self.quitting:
             return
+        if self.desktop_controller.engine.active:
+            self.desktop_controller.capture(assistance=True)
         try:
             snapshots = [(screen, capture_screen(screen)) for screen in self.app.screens()]
             if not snapshots:
@@ -1414,6 +1461,8 @@ class ApplicationController(QObject):
                 self.retry_skill = None
                 self.last_result = text
                 if isinstance(text, SkillResult):
+                    self.desktop_controller.evaluate(screenshot_skill=text.skill_id,
+                        screenshot_id=self.capture_created_at)
                     self.prepare_editable_result(text)
                     self.saved_example_id = None
                     self.result.set_skill_result(text, editable=self.editable_extraction is not None)
@@ -1715,6 +1764,7 @@ class ApplicationController(QObject):
             api_key_configured=bool(os.getenv("AI_API_KEY")),
             api_key_stored=self.api_key_stored)
         self.settings.submitted.connect(self.apply_settings)
+        self.settings.agent_beta_requested.connect(self.open_beta_features)
         self.settings.remove_key_requested.connect(self.remove_saved_api_key)
         self.settings.show()
         self.settings.raise_()
@@ -2107,8 +2157,15 @@ class ApplicationController(QObject):
             return
         self.config = config
         self.main_window.config = config
+        if hasattr(self, 'desktop_controller'):
+            desktop_fields = ('desktop_metadata_enabled', 'desktop_ui_policy', 'desktop_selection_policy',
+                'desktop_clipboard_policy', 'desktop_blocked_apps', 'desktop_app_policies')
+            if any(getattr(previous, name) != getattr(config, name) for name in desktop_fields):
+                self.desktop_controller.apply_preferences()
         if self.ai_runtime_dialog is not None:
             self.ai_runtime_dialog.config = config
+        if hasattr(self, 'agent_controller'):
+            self.agent_controller.apply_defaults()
         self.sync_ai_runtime_preferences()
         if config.ai_base_url is not None:
             os.environ['AI_BASE_URL'] = config.ai_base_url
@@ -2163,6 +2220,11 @@ class ApplicationController(QObject):
 
     def quit(self) -> None:
         self.quitting = True
+        if getattr(self, 'desktop_controller', None):
+            self.desktop_controller.stop()
+            self.desktop_controller.panel.close()
+        if getattr(self, 'agent_controller', None):
+            self.agent_controller.stop()
         self.server_service.close()
         self.mcp_shutdown_future = self.extension_service.begin_shutdown()
         self.hotkeys.close()
@@ -2189,6 +2251,12 @@ class ApplicationController(QObject):
             self.finish_quit()
 
     def finish_quit(self) -> None:
+        if getattr(self, 'desktop_controller', None) and self.desktop_controller.busy:
+            QTimer.singleShot(50, self.finish_quit)
+            return
+        if getattr(self, 'agent_controller', None) and self.agent_controller.busy:
+            QTimer.singleShot(50, self.finish_quit)
+            return
         if self.mcp_shutdown_future is not None and not self.mcp_shutdown_future.done():
             QTimer.singleShot(50, self.finish_quit)
             return
@@ -2206,6 +2274,8 @@ class ApplicationController(QObject):
         self.integration_pool.waitForDone()
         self.memory_pool.waitForDone()
         self.context_pool.waitForDone()
+        if getattr(self, 'desktop_controller', None):
+            self.desktop_controller.pool.waitForDone()
         if self.managed_ai_runtime is not None:
             try:
                 self.managed_ai_runtime.stop(force=True, timeout_seconds=2)
