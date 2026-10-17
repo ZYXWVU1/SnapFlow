@@ -183,6 +183,8 @@ class DesktopController(QObject):
 
     def invalidate_consumers(self):
         owner = self.owner
+        if getattr(owner, 'desktop_actions_controller', None):
+            owner.desktop_actions_controller.stop()
         if owner.context_session is not None and owner.context_session.desktop_sources:
             owner.context_permissions.select_desktop_sources(owner.context_session, ())
             owner.context_latest_request = None

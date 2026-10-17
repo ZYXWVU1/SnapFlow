@@ -118,6 +118,8 @@ class AgentCapabilityRegistry:
     def catalog(self):
         result = []
         for capability_id in self._entries:
+            if capability_id in getattr(self, 'historical_capabilities', ()):
+                continue
             current = self.get(capability_id)
             if current is not None:
                 result.append(current.to_dict() | {'fingerprint': current.fingerprint})

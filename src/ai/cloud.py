@@ -43,7 +43,7 @@ class CloudRuntime:
             payload, image_metadata = prepare_image(request.image_bytes, request.metadata.get('cloud_max_image_width'))
             request = replace(request, image_bytes=payload, metadata={**request.metadata, 'image_encoding': image_metadata['encoding']})
         from .cancellation import run_cancellable
-        content = run_cancellable(lambda: self.executor(request), request.cancelled, request.timeout_seconds)
+        content = run_cancellable(lambda: self.executor(request), request.cancelled, request.remaining_timeout)
         structured = validate_schema(request.response_schema, content) if request.response_schema else None
         return AIResponse(request.request_id, self.runtime_id, self.model_id, content,
                           structured_data=structured, latency_ms=(time.perf_counter() - started) * 1000, local=False,

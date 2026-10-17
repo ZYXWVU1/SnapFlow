@@ -102,6 +102,29 @@ class ExecutionJournal:
             if cursor.rowcount != 1:
                 raise ValueError('Invalid journal approval transition.')
 
+    def claim_desktop(self, invocation):
+        """Opaque action identity; UNIQUE prevents replay even across process restarts."""
+        import re
+        if not isinstance(invocation, str) or not re.fullmatch('[a-f0-9]{32}', invocation):
+            raise ValueError('Invalid desktop invocation identity.')
+        with self.connection() as db:
+            self._trim(db)
+            if db.execute("SELECT count(*) FROM execution_journal WHERE status NOT IN ('completed','failed','reviewed')").fetchone()[0] >= 1024:
+                raise RuntimeError('Review interrupted actions before starting more writes.')
+            db.execute('INSERT INTO execution_journal (invocation_id,owner_id,component,status,planned_at) '
+                       "VALUES (?,?,?,'planned',?)", (invocation, self.owner_id, 'desktop_write', now()))
+        return invocation
+
+    def checkpoint_desktop(self, invocation, status):
+        previous = {'action_sent': 'started', 'verification_started': 'action_sent'}.get(status)
+        if previous is None:
+            raise ValueError('Invalid desktop checkpoint.')
+        with self.connection() as db:
+            cursor = db.execute('UPDATE execution_journal SET status=? WHERE invocation_id=? AND owner_id=? '
+                "AND component='desktop_write' AND status=?", (status, invocation, self.owner_id, previous))
+            if cursor.rowcount != 1:
+                raise ValueError('Invalid desktop journal transition.')
+
     def started(self, invocation):
         with self.connection() as db:
             cursor = db.execute("UPDATE execution_journal SET status='started',started_at=? "
@@ -114,7 +137,7 @@ class ExecutionJournal:
             raise ValueError('Invalid invocation outcome.')
         with self.connection() as db:
             cursor = db.execute("UPDATE execution_journal SET status=?,ended_at=? "
-                "WHERE invocation_id=? AND owner_id=? AND status='started'", (status, now(), invocation, self.owner_id))
+                "WHERE invocation_id=? AND owner_id=? AND status IN ('started','action_sent','verification_started')", (status, now(), invocation, self.owner_id))
             if cursor.rowcount != 1:
                 raise ValueError('Invalid journal transition.')
             self._trim(db)
@@ -122,7 +145,7 @@ class ExecutionJournal:
     def recover_interrupted(self):
         with self.connection() as db:
             return db.execute("UPDATE execution_journal SET status='interrupted',ended_at=? "
-                "WHERE status IN ('planned','approved','started') AND owner_id!=?", (now(), self.owner_id)).rowcount
+                "WHERE status IN ('planned','approved','started','action_sent','verification_started') AND owner_id!=?", (now(), self.owner_id)).rowcount
 
     def records(self, limit=1000):
         with self.connection() as db:

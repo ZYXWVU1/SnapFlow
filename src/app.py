@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Qt, Signal, Slot
@@ -259,6 +260,7 @@ class ApplicationController(QObject):
         self.last_safe_error = None
         self.ai_execution_history = AIExecutionHistory(self.paths.learning_database)
         self.model_performance_store = ModelPerformanceStore(self.paths.learning_database)
+        self._last_ai_execution_metadata = None
         self.ai_runtime_dialog = None
         self.managed_ai_runtime = None
         self.semantic_rebuild_worker = None
@@ -328,6 +330,9 @@ class ApplicationController(QObject):
         self.settings: SettingsWindow | None = None
         self.update_worker: UpdateCheckWorker | None = None
         self.health_check_worker: BasicHealthCheckWorker | None = None
+        self._health_check_completed = False
+        self._last_health_check_result = None
+        self._update_status = None
         self.onboarding_dialog: OnboardingDialog | None = None
         self.onboarding_connection_worker: OnboardingConnectionWorker | None = None
         self._onboarding_capture_test = False
@@ -335,9 +340,8 @@ class ApplicationController(QObject):
         self.main_window = MainWindow(self.config.hotkey, skills_storage=self.custom_storage,
             workflows_storage=self.workflow_storage, history=self.workflow_history, config=self.config,
             integration_registry=self.integration_registry, connection_storage=self.connection_storage,
-            paths=self.paths, memory_store=self.memory_store, extension_service=self.extension_service)
-        self.main_window.pages['history'].ai_history = self.ai_execution_history
-        self.main_window.pages['history'].refresh()
+            paths=self.paths, memory_store=self.memory_store, extension_service=self.extension_service,
+            page_configurator=self.configure_page)
         self.runtime_choice_service = RuntimeChoiceService(self.main_window, lambda: self.config, self.network_policy)
         self.client.runtime_choice = self.runtime_choice_service.choose
         self.main_window.ai_runtime_requested.connect(self.open_ai_runtime_settings)
@@ -347,9 +351,6 @@ class ApplicationController(QObject):
         self.server_service.approval_parent = self.main_window
         self.extension_service.resource_selected.connect(self.select_mcp_context_resource)
         self.extension_service.prompt_selected.connect(self.select_mcp_context_prompt)
-        self.main_window.pages['evaluation'].client = self.client
-        self.main_window.pages['evaluation'].usage_storage = self.usage_storage
-        self.main_window.pages['evaluation'].max_evaluation_cases = self.config.max_evaluation_cases
         self.main_window.capture_requested.connect(self.capture)
         self.main_window.feature_requested.connect(self.open_feature)
         self.main_window.integration_connect_requested.connect(self.connect_integration)
@@ -364,13 +365,6 @@ class ApplicationController(QObject):
         self.main_window.open_data_folder_requested.connect(self.open_data_folder)
         self.main_window.storage_usage_requested.connect(self.refresh_storage_usage)
         self.main_window.support_bundle_requested.connect(self.export_support_bundle)
-        self.main_window.pages['settings'].clear_analytics_requested.connect(self.clear_local_analytics)
-        settings_page = self.main_window.pages['settings']
-        settings_page.beta_features_requested.connect(self.open_beta_features)
-        settings_page.feedback_requested.connect(self.open_beta_feedback)
-        settings_page.report_issue_requested.connect(lambda: self.open_beta_feedback(report_issue=True))
-        settings_page.health_center_requested.connect(self.open_health_center)
-        settings_page.beta_insights_requested.connect(self.open_beta_insights)
         self.main_window.health_check_requested.connect(self.run_health_check)
         self.main_window.usage_summary_requested.connect(self.refresh_usage_summary)
         self.main_window.update_check_requested.connect(self.check_for_updates)
@@ -378,8 +372,6 @@ class ApplicationController(QObject):
         self.main_window.memory_open_requested.connect(self.open_memory_record)
         self.main_window.memory_ask_requested.connect(self.ask_memory)
         self.main_window.memory_rebuild_requested.connect(self.rebuild_memory_index)
-        self.main_window.pages['memory'].set_ai_enabled(
-            self.config.visual_memory_enabled and self.config.ai_memory_questions)
         self.api_usage_changed.connect(self.update_usage_summary)
         self.monthly_cost_warning.connect(self.show_monthly_cost_warning)
         self.update_usage_summary(self.usage_storage.monthly_summary(
@@ -415,6 +407,8 @@ class ApplicationController(QObject):
         from src.ui.agent.controller import AgentController
         from src.ui.context.desktop_controller import DesktopController
         self.desktop_controller = DesktopController(self)
+        from src.ui.agent.desktop_actions import DesktopActionsController
+        self.desktop_actions_controller = DesktopActionsController(self)
         self.context_permissions.desktop_validator = self.desktop_controller.service.validate_sources
         self.agent_controller = AgentController(self)
         self.result.agent_requested.connect(self.open_agent)
@@ -441,6 +435,7 @@ class ApplicationController(QObject):
         self.menu.addAction("Visual Skills", self.open_skills)
         self.menu.addAction("Visual Workflows", self.open_workflows)
         self.menu.addAction('Desktop Context…', self.desktop_controller.show)
+        self.menu.addAction('Desktop Actions…', self.desktop_actions_controller.show_settings)
         self.desktop_controller.session_action = self.menu.addAction('Start Desktop Assistance…', self.desktop_controller.request_start)
         self.menu.addAction('Stop Desktop Assistance', self.desktop_controller.stop)
         self.menu.addSeparator()
@@ -479,12 +474,49 @@ class ApplicationController(QObject):
         self.refresh_observability_status()
         if self.safe_mode:
             self.main_window.setWindowTitle(APP_NAME + ' — SAFE MODE')
-        if self.recovery_warning:
-            self.main_window.pages['settings'].set_reliability_status(self.recovery_warning)
+
+    def configure_page(self, key, page):
+        """Attach services and signals when an optional page is first created."""
+        if key == 'history':
+            page.ai_history = self.ai_execution_history
+            page.refresh()
+        elif key == 'evaluation':
+            page.client = self.client
+            page.usage_storage = self.usage_storage
+            page.max_evaluation_cases = self.config.max_evaluation_cases
+        elif key == 'memory':
+            page.set_ai_enabled(self.config.visual_memory_enabled and self.config.ai_memory_questions)
+            page.set_semantic_available(self.memory_store.semantic_index is not None)
+        elif key == 'settings':
+            page.clear_analytics_requested.connect(self.clear_local_analytics)
+            page.beta_features_requested.connect(self.open_beta_features)
+            page.feedback_requested.connect(self.open_beta_feedback)
+            page.report_issue_requested.connect(lambda: self.open_beta_feedback(report_issue=True))
+            page.health_center_requested.connect(self.open_health_center)
+            page.beta_insights_requested.connect(self.open_beta_insights)
+            page.desktop_actions_requested.connect(self.desktop_actions_controller.show_settings)
+            self._refresh_settings_beta(page)
+            page.set_usage_summary(self.usage_storage.monthly_summary(
+                session_start=self.usage_session_started), self.config.monthly_cost_warning_usd)
+            page.set_runtime_summary(self.ai_execution_history.summary())
+            if self._last_ai_execution_metadata is not None:
+                page.set_execution_details(*self._last_ai_execution_metadata)
+            page.set_reliability_status(self._reliability_status())
+            if self.last_safe_error is not None:
+                page.report_issue_button.setEnabled(True)
+            if self._health_check_completed:
+                page.set_health_check_result(self._last_health_check_result)
+            if self.health_check_worker is not None:
+                page.set_health_check_running(True)
+            if self._update_status is not None:
+                message, checking = self._update_status
+                page.set_update_status(message, checking=checking)
 
     def show_recovery_error(self, record):
         self.last_safe_error = record
-        self.main_window.pages['settings'].report_issue_button.setEnabled(True)
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            page.report_issue_button.setEnabled(True)
         self.main_window.toast.show_message(record['safe_message'] + ' Reference: ' + record['crash_id'][:12])
 
     def safe_diagnostics_snapshot(self):
@@ -494,7 +526,11 @@ class ApplicationController(QObject):
     def refresh_beta_controls(self):
         if getattr(self, 'agent_controller', None):
             self.agent_controller.refresh_enabled()
-        page = self.main_window.pages['settings']
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            self._refresh_settings_beta(page)
+
+    def _refresh_settings_beta(self, page):
         page.beta_insights_button.setEnabled(self.beta_features.enabled('beta_insights'))
         variant = self.beta_features.variant('feedback_wording', analytics_enabled=self.config.local_observability_enabled)
         page.feedback_button.setText('Report a Problem' if variant == 'B' else 'Send Feedback')
@@ -671,14 +707,20 @@ class ApplicationController(QObject):
         self.refresh_beta_controls()
         self.refresh_observability_status()
 
-    def refresh_observability_status(self):
-        message = ''
+    def _reliability_status(self):
+        if self.recovery_warning:
+            return self.recovery_warning
         if self.observability.warning:
-            message = self.observability.warning
-        elif self.observability.session and self.observability.session.previous_session_unclean:
-            message = ('The previous session did not close normally. Review diagnostics '
-                       'before retrying interrupted actions. No actions were replayed.')
-        self.main_window.pages['settings'].set_reliability_status(message)
+            return self.observability.warning
+        if self.observability.session and self.observability.session.previous_session_unclean:
+            return ('The previous session did not close normally. Review diagnostics '
+                    'before retrying interrupted actions. No actions were replayed.')
+        return ''
+
+    def refresh_observability_status(self):
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            page.set_reliability_status(self._reliability_status())
 
     def tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -717,7 +759,7 @@ class ApplicationController(QObject):
             return
         dialog.exec()
         if dialog.changed:
-            self.main_window.pages['memory'].refresh()
+            self.main_window.refresh_created_page('memory')
 
     def open_context_assistant(self, *, desktop=False) -> None:
         if (self.quitting or not self.config.contextual_assistant_enabled or
@@ -994,7 +1036,7 @@ class ApplicationController(QObject):
             QMessageBox.warning(self.result, 'Unable to save Memory', str(exc))
             return
         self.result.set_notice('Saved to Visual Memory locally.')
-        self.main_window.pages['memory'].refresh()
+        self.main_window.refresh_created_page('memory')
 
     def rebuild_memory_index(self):
         if self.semantic_rebuild_worker is not None:
@@ -1022,10 +1064,13 @@ class ApplicationController(QObject):
     def memory_index_finished(self, name):
         self.semantic_rebuild_worker = None
         self.main_window.pages['settings'].rebuild_memory_index.setText('Rebuild Memory Search Index')
-        self.main_window.pages['memory'].refresh()
+        self.main_window.refresh_created_page('memory')
 
     def configure_semantic_memory(self):
+        previous_index = getattr(self.memory_store, 'semantic_index', None)
         self.memory_store.semantic_index = None
+        if previous_index is not None:
+            previous_index.provider.runtime.shutdown()
         config = self.config
         if config.semantic_search_enabled and config.local_embedding_model and config.local_embedding_dimension:
             from src.ai.embeddings import EmbeddingManifest, LocalEmbeddingProvider, SemanticMemoryIndex
@@ -1056,7 +1101,9 @@ class ApplicationController(QObject):
         self.client.managed_runtime = manager
         self.client.configure(self.config)
         self.configure_semantic_memory()
-        self.main_window.pages['memory'].set_semantic_available(self.memory_store.semantic_index is not None)
+        page = self.main_window.get_created_page('memory')
+        if page is not None:
+            page.set_semantic_available(self.memory_store.semantic_index is not None)
 
     @Slot(object)
     def apply_runtime_preferences(self, config):
@@ -1064,7 +1111,8 @@ class ApplicationController(QObject):
             'ai_execution_mode', 'private_mode', 'allow_cloud_fallback', 'local_ai_endpoint',
             'local_ai_model', 'local_ai_vision', 'local_ai_structured_output', 'local_ai_context_length',
             'local_embedding_model', 'local_embedding_dimension', 'semantic_search_enabled',
-            'local_ai_model_version', 'ai_model_version', 'local_embedding_version')})
+            'local_ai_model_version', 'ai_model_version', 'local_embedding_version',
+            'controlled_desktop_actions_enabled', 'desktop_target_highlight')})
         try:
             save_config(config, self.paths.config_file)
         except (OSError, ValueError) as exc:
@@ -1075,7 +1123,9 @@ class ApplicationController(QObject):
         if self.settings is not None:
             self.settings.config = config
         self.sync_ai_runtime_preferences()
-        self.main_window.pages['settings'].refresh(config)
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            page.refresh(config)
         self.refresh_usage_summary()
         if config.private_mode and not config.local_ai_model:
             self.main_window.toast.show_message('Private Mode is active. Configure a compatible local model to enable AI analysis.')
@@ -1088,7 +1138,9 @@ class ApplicationController(QObject):
             self.semantic_rebuild_cancel.set()
         self.configure_semantic_memory()
         self.main_window.set_privacy_state(self.config.private_mode)
-        self.main_window.pages['memory'].set_semantic_available(self.memory_store.semantic_index is not None)
+        page = self.main_window.get_created_page('memory')
+        if page is not None:
+            page.set_semantic_available(self.memory_store.semantic_index is not None)
         if self.context_dialog:
             self.context_dialog.close()
 
@@ -1101,9 +1153,19 @@ class ApplicationController(QObject):
 
     @Slot(object, object)
     def show_ai_execution(self, response, decision):
-        self.main_window.pages['settings'].set_execution_details(response, decision)
-        self.main_window.pages['settings'].set_runtime_summary(self.ai_execution_history.summary())
-        self.main_window.pages['history'].refresh()
+        # Retain only what Settings displays; never retain prompts or answer contents.
+        metadata = SimpleNamespace(local=response.local, model_id=response.model_id,
+            runtime_id=response.runtime_id, latency_ms=response.latency_ms)
+        routing = SimpleNamespace(reason_codes=tuple(getattr(decision, 'reason_codes', ()) or ()),
+            estimated_cost=getattr(decision, 'estimated_cost', None))
+        self._last_ai_execution_metadata = metadata, routing
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            page.set_execution_details(metadata, routing)
+            page.set_runtime_summary(self.ai_execution_history.summary())
+        page = self.main_window.get_created_page('history')
+        if page is not None:
+            page.refresh()
         if hasattr(self, 'result'):
             self.result.set_notice(('LOCAL · ' if response.local else 'CLOUD · ') + response.model_id)
 
@@ -1194,7 +1256,7 @@ class ApplicationController(QObject):
 
     @Slot(str, object)
     def integration_finished(self, integration_id, outcome):
-        self.main_window.pages['integrations'].refresh()
+        self.main_window.refresh_created_page('integrations')
         self.main_window.pages['integrations'].set_busy(integration_id, False)
         self.integration_jobs.pop(integration_id, None)
         self._refresh_google_calendar_action()
@@ -1230,7 +1292,7 @@ class ApplicationController(QObject):
         if (not self.quitting and self.last_result is source_result and
                 self.result.calendar_event_result is source_result):
             self.result.set_calendar_action_status(outcome.message)
-        self.main_window.pages['integrations'].refresh()
+        self.main_window.refresh_created_page('integrations')
 
     def capture(self) -> None:
         if self.capturing or self.workers or self.quitting:
@@ -1625,7 +1687,7 @@ class ApplicationController(QObject):
                      for step in execution.steps)
         self._workflow_results.append('\n'.join(lines))
         self.result.set_workflow_status('\n\n'.join(self._workflow_results), running=running)
-        self.main_window.pages['integrations'].refresh()
+        self.main_window.refresh_created_page('integrations')
         for step in execution.steps:
             if step.status == 'success' and step.action_id in (
                 'google_calendar_create_event', 'google_sheets_append_row', 'todoist_create_task'):
@@ -1685,22 +1747,22 @@ class ApplicationController(QObject):
         if self.skill_manager is None:
             self.skill_manager = SkillManager(self.custom_storage, self.client.scoped(lambda: self.quitting), self.result,
                 workflows=self.workflow_storage, feedback_storage=self.feedback_storage)
-            self.skill_manager.finished.connect(lambda _: self.main_window.pages['skills'].refresh())
+            self.skill_manager.finished.connect(lambda _: self.main_window.refresh_created_page('skills'))
         return self.skill_manager
 
     def edit_skill(self, skill_id):
         skill = self.custom_storage.get_skill(skill_id)
         if skill is None:
-            self.main_window.pages['skills'].refresh()
+            self.main_window.refresh_created_page('skills')
             return None
         editor = self._ensure_skill_manager().show_editor(skill)
-        editor.saved.connect(lambda _: QTimer.singleShot(0, self.main_window.pages['skills'].refresh))
+        editor.saved.connect(lambda _: QTimer.singleShot(0, lambda: self.main_window.refresh_created_page('skills')))
         return editor
 
     def test_skill(self, skill_id):
         skill = self.custom_storage.get_skill(skill_id)
         if skill is None:
-            self.main_window.pages['skills'].refresh()
+            self.main_window.refresh_created_page('skills')
             return None
         from src.ui.skills.skill_test_dialog import SkillTestDialog
         dialog = SkillTestDialog(skill, self.client.scoped(lambda: self.quitting), self.result)
@@ -1722,22 +1784,22 @@ class ApplicationController(QObject):
                 allow_auto=True, result_provider=lambda: self.last_result if isinstance(self.last_result, SkillResult) else None,
                 history=self.workflow_history, connection_storage=self.connection_storage,
                 open_integrations=self.open_integrations, integration_service=self.integration_service)
-            self.workflow_manager.finished.connect(lambda _: self.main_window.pages['workflows'].refresh())
+            self.workflow_manager.finished.connect(lambda _: self.main_window.refresh_created_page('workflows'))
         return self.workflow_manager
 
     def edit_workflow(self, workflow_id):
         definition = self.workflow_storage.get_workflow(workflow_id)
         if definition is None:
-            self.main_window.pages['workflows'].refresh()
+            self.main_window.refresh_created_page('workflows')
             return None
         editor = self._ensure_workflow_manager().show_editor(definition)
-        editor.saved.connect(lambda _: QTimer.singleShot(0, self.main_window.pages['workflows'].refresh))
+        editor.saved.connect(lambda _: QTimer.singleShot(0, lambda: self.main_window.refresh_created_page('workflows')))
         return editor
 
     def test_workflow(self, workflow_id):
         definition = self.workflow_storage.get_workflow(workflow_id)
         if definition is None:
-            self.main_window.pages['workflows'].refresh()
+            self.main_window.refresh_created_page('workflows')
             return
         if not isinstance(self.last_result, SkillResult) or self.last_result.skill_id != definition.trigger.skill_id:
             self.main_window.toast.show_message('Capture a screenshot matching this Visual Skill, then run the test.')
@@ -1839,8 +1901,12 @@ class ApplicationController(QObject):
             return
         self.config = candidate
         self.main_window.config = candidate
-        self.main_window.pages['settings'].refresh(candidate)
-        self.main_window.pages['evaluation'].max_evaluation_cases = candidate.max_evaluation_cases
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            page.refresh(candidate)
+        page = self.main_window.get_created_page('evaluation')
+        if page is not None:
+            page.max_evaluation_cases = candidate.max_evaluation_cases
         os.environ['AI_BASE_URL'] = candidate.ai_base_url
         os.environ['AI_MODEL'] = candidate.ai_model
         if key:
@@ -1997,7 +2063,7 @@ class ApplicationController(QObject):
     def run_health_check(self) -> None:
         if self.health_check_worker is not None or self.quitting:
             return
-        page = self.main_window.pages.get('settings')
+        page = self.main_window.get_created_page('settings')
         if page is not None:
             page.set_health_check_running(True)
         worker = BasicHealthCheckWorker(self.diagnostics_service)
@@ -2008,7 +2074,9 @@ class ApplicationController(QObject):
     @Slot(object)
     def health_check_finished(self, result) -> None:
         self.health_check_worker = None
-        page = self.main_window.pages.get('settings')
+        self._health_check_completed = True
+        self._last_health_check_result = result
+        page = self.main_window.get_created_page('settings')
         if page is not None:
             page.set_health_check_result(result)
 
@@ -2035,12 +2103,14 @@ class ApplicationController(QObject):
             logging.getLogger(__name__).warning("Unable to load provider token usage.", exc_info=True)
             return
         self.update_usage_summary(summary)
-        self.main_window.pages['settings'].set_runtime_summary(self.ai_execution_history.summary())
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            page.set_runtime_summary(self.ai_execution_history.summary())
         self.maybe_warn_monthly_cost(summary)
 
     @Slot(object)
     def update_usage_summary(self, summary) -> None:
-        page = self.main_window.pages.get("settings") if hasattr(self, "main_window") else None
+        page = self.main_window.get_created_page("settings") if hasattr(self, "main_window") else None
         if page is not None:
             page.set_usage_summary(summary, self.config.monthly_cost_warning_usd)
 
@@ -2054,9 +2124,7 @@ class ApplicationController(QObject):
     def check_for_updates(self, manual=True) -> None:
         if self.update_worker is not None:
             return
-        page = self.main_window.pages.get('settings')
-        if page is not None:
-            page.set_update_status('Checking the configured GitHub Releases source…', checking=True)
+        self._set_update_status('Checking the configured GitHub Releases source…', checking=True)
         worker = UpdateCheckWorker(self.config.update_channel)
         self.update_worker = worker
         worker.signals.finished.connect(self.update_check_finished)
@@ -2065,9 +2133,7 @@ class ApplicationController(QObject):
     @Slot(object, str)
     def update_check_finished(self, result, error) -> None:
         self.update_worker = None
-        page = self.main_window.pages.get('settings')
-        if page is not None:
-            page.set_update_status('Unable to check for updates. Check your connection and try again.')
+        self._set_update_status('Unable to check for updates. Check your connection and try again.')
         if result is None:
             return
         if result.error_code == 'no_release':
@@ -2077,18 +2143,22 @@ class ApplicationController(QObject):
         elif result.release and result.release.is_newer:
             release = result.release
             message = f'Version {release.tag_name} is available.'
-            if page is not None:
-                page.set_update_status(message)
+            self._set_update_status(message)
             dialog = UpdateDialog(release, self.main_window)
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 opened = QDesktopServices.openUrl(QUrl(official_release_page()))
-                if not opened and page is not None:
-                    page.set_update_status('The release page could not be opened. Visit the SnapFlow releases page on GitHub.')
+                if not opened:
+                    self._set_update_status('The release page could not be opened. Visit the SnapFlow releases page on GitHub.')
             return
         else:
             message = f'{APP_NAME} {APP_VERSION} is up to date.'
+        self._set_update_status(message)
+
+    def _set_update_status(self, message, *, checking=False):
+        self._update_status = message, checking
+        page = self.main_window.get_created_page('settings')
         if page is not None:
-            page.set_update_status(message)
+            page.set_update_status(message, checking=checking)
 
     def export_support_bundle(self) -> None:
         from pathlib import Path
@@ -2171,9 +2241,12 @@ class ApplicationController(QObject):
             os.environ['AI_BASE_URL'] = config.ai_base_url
         if config.ai_model is not None:
             os.environ['AI_MODEL'] = config.ai_model
-        self.main_window.pages['settings'].refresh(config)
-        self.main_window.pages['memory'].set_ai_enabled(
-            config.visual_memory_enabled and config.ai_memory_questions)
+        page = self.main_window.get_created_page('settings')
+        if page is not None:
+            page.refresh(config)
+        page = self.main_window.get_created_page('memory')
+        if page is not None:
+            page.set_ai_enabled(config.visual_memory_enabled and config.ai_memory_questions)
         self.result.memory_save_enabled = (
             config.visual_memory_enabled and config.show_memory_save_button)
         self.result.context_enabled = config.contextual_assistant_enabled
@@ -2182,7 +2255,9 @@ class ApplicationController(QObject):
                 (self.context_session and self.context_session.scope == 'authorized_memory_search'
                  and not config.context_memory_search_enabled)):
             self.context_dialog.close()
-        self.main_window.pages['evaluation'].max_evaluation_cases = config.max_evaluation_cases
+        page = self.main_window.get_created_page('evaluation')
+        if page is not None:
+            page.max_evaluation_cases = config.max_evaluation_cases
         self.sync_observability_preferences()
         self.theme_manager.set_preference(config.theme)
         self.main_window.hotkey_label.setText(' + '.join(part.capitalize() for part in config.hotkey.split('+')))
@@ -2221,6 +2296,7 @@ class ApplicationController(QObject):
     def quit(self) -> None:
         self.quitting = True
         if getattr(self, 'desktop_controller', None):
+            self.desktop_actions_controller.stop()
             self.desktop_controller.stop()
             self.desktop_controller.panel.close()
         if getattr(self, 'agent_controller', None):
@@ -2229,8 +2305,12 @@ class ApplicationController(QObject):
         self.mcp_shutdown_future = self.extension_service.begin_shutdown()
         self.hotkeys.close()
         self.clear_overlays()
-        self.main_window.pages['memory'].stop_semantic_search()
-        self.main_window.pages['evaluation'].stop_ai_work()
+        memory_page = self.main_window.get_created_page('memory')
+        if memory_page is not None:
+            memory_page.stop_semantic_search()
+        evaluation_page = self.main_window.get_created_page('evaluation')
+        if evaluation_page is not None:
+            evaluation_page.stop_ai_work()
         self.main_window.close()
         self.image_bytes = b""
         if self.settings:
@@ -2251,6 +2331,9 @@ class ApplicationController(QObject):
             self.finish_quit()
 
     def finish_quit(self) -> None:
+        if getattr(self, 'desktop_actions_controller', None) and self.desktop_actions_controller.worker:
+            QTimer.singleShot(50, self.finish_quit)
+            return
         if getattr(self, 'desktop_controller', None) and self.desktop_controller.busy:
             QTimer.singleShot(50, self.finish_quit)
             return
@@ -2264,7 +2347,9 @@ class ApplicationController(QObject):
                 self.integration_jobs or self.calendar_event_worker is not None or
                 self.memory_recall_worker is not None or
                 self.semantic_rebuild_worker is not None or
-                self.context_workers or self.main_window.pages['memory'].semantic_search_running):
+                self.context_workers or
+                (self.main_window.get_created_page('memory') is not None and
+                 self.main_window.get_created_page('memory').semantic_search_running)):
             self.result.set_response('Finishing the current skill request before quitting...', error=True)
             self.result.show()
             QTimer.singleShot(50, self.finish_quit)
@@ -2276,11 +2361,15 @@ class ApplicationController(QObject):
         self.context_pool.waitForDone()
         if getattr(self, 'desktop_controller', None):
             self.desktop_controller.pool.waitForDone()
+            self.desktop_actions_controller.pool.waitForDone()
         if self.managed_ai_runtime is not None:
             try:
                 self.managed_ai_runtime.stop(force=True, timeout_seconds=2)
             except Exception:
                 logging.getLogger(__name__).warning('Owned local runtime could not stop during shutdown.')
+        self.client.close()
+        if self.memory_store.semantic_index is not None:
+            self.memory_store.semantic_index.provider.runtime.shutdown()
         self.tray.hide()
         self.close_observability()
         self.app.quit()

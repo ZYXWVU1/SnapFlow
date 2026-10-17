@@ -21,7 +21,7 @@ class OperationProfiler:
         self.dropped = 0
         self._closed = False
         self._discard = False
-        self._stop = threading.Event()
+        self._delivery_lock = threading.Lock()
         self.worker = threading.Thread(target=self._consume, name='safe-operation-events', daemon=True)
         self.worker.start()
 
@@ -33,7 +33,10 @@ class OperationProfiler:
             # Reject unknown operation labels instead of recording an empty trace.
             if event_type == 'operation_completed' and 'operation' not in event.properties:
                 return False
-            self.queue.put_nowait(event)
+            with self._delivery_lock:
+                if self._closed:
+                    return False
+                self.queue.put_nowait(event)
             return True
         except queue.Full:
             self.dropped += 1
@@ -57,25 +60,32 @@ class OperationProfiler:
             self.record(operation, component, (time.perf_counter() - started) * 1000, success)
 
     def _consume(self):
-        while not self._stop.is_set() or not self.queue.empty():
+        while True:
+            event = self.queue.get()
             try:
-                event = self.queue.get(timeout=.05)
-            except queue.Empty:
-                continue
-            try:
-                if self._discard:
-                    continue
-                self.provider().emit(event.event_type, component=event.component,
-                    duration_ms=event.duration_ms, success=event.success, properties=dict(event.properties))
+                if event is None:
+                    return
+                if not self._discard:
+                    self.provider().emit(event.event_type, component=event.component,
+                        duration_ms=event.duration_ms, success=event.success, properties=dict(event.properties))
             except Exception:
                 self.dropped += 1
             finally:
                 self.queue.task_done()
+            with self._delivery_lock:
+                if self._closed and self.queue.empty():
+                    return
 
     def close(self, timeout=2, *, drain=True):
-        self._closed = True
-        self._discard = self._discard or not drain
-        self._stop.set()
+        with self._delivery_lock:
+            if not self._closed:
+                self._closed = True
+                self._discard = not drain
+                try:
+                    self.queue.put_nowait(None)
+                except queue.Full:
+                    # The consumer exits after draining or discarding the full queue.
+                    pass
         self.worker.join(timeout)
         return not self.worker.is_alive()
 

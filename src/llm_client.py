@@ -4,10 +4,9 @@ import logging
 import os
 import time
 import threading
+import math
 from contextlib import contextmanager
 import httpx
-
-from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from src.config import DEFAULT_AI_BASE_URL, DEFAULT_AI_MODEL
 from src.prompts import get_prompt
@@ -17,7 +16,7 @@ class AnalysisError(Exception):
     """A message safe to display without exposing request data or credentials."""
 
 
-def _status_error_detail(error: APIStatusError) -> str:
+def _status_error_detail(error) -> str:
     """Extract the provider's safe error message without exposing request data."""
     body = getattr(error, "body", None)
     if isinstance(body, dict):
@@ -45,6 +44,8 @@ def _request_timeout(base_url: str) -> float:
         value = float(os.getenv("AI_TIMEOUT", str(default)).strip())
     except ValueError:
         return default
+    if not math.isfinite(value):
+        return default
     return max(10.0, min(value, 600.0))
 
 
@@ -67,6 +68,8 @@ class LLMClient:
         self.managed_runtime = None
         self.fallback_callback = None
         self._request_scope = threading.local()
+        from src.ai.transport import ClientPool
+        self._cloud_pool = ClientPool()
 
     def scoped(self, cancelled):
         client = self
@@ -94,7 +97,21 @@ class LLMClient:
 
     def configure(self, config):
         self.config = config
+        self._cloud_pool.invalidate()
+        if self._local_runtime is not None:
+            self._local_runtime.shutdown()
         self._local_runtime = None
+
+    def close(self):
+        self._cloud_pool.close()
+        if self._local_runtime is not None:
+            self._local_runtime.shutdown()
+
+    def _timeout_seconds(self, endpoint=None):
+        # Keep the established longer local budget unless explicitly configured.
+        if self.config.ai_execution_mode != 'cloud_only' and not os.getenv('AI_TIMEOUT'):
+            return 120.0
+        return _request_timeout(endpoint or self.config.ai_base_url or DEFAULT_AI_BASE_URL)
 
     @contextmanager
     def inference_scope(self, callback):
@@ -120,7 +137,10 @@ class LLMClient:
         runtimes = [CloudRuntime(cloud_model, cloud_executor, cloud_endpoint, self.policy)]
         config = self.config
         from src.ai.routing_context import collect_resources, RoutingContextResolver
-        resources = collect_resources() if config.local_ai_model else {}
+        needs_local = bool(config.local_ai_model) and (config.ai_execution_mode != 'cloud_only'
+            or config.private_mode or self.policy.private_mode
+            or request.privacy_requirement in ('local_only', 'private'))
+        resources = collect_resources() if needs_local else {}
         data = {**request.metadata, **resources, 'cloud_base_url': cloud_endpoint}
         if data.get('definition_snapshot') and self.performance_store:
             evidence = RoutingContextResolver(self.paths, self.performance_store).resolve(
@@ -131,7 +151,7 @@ class LLMClient:
         data.pop('definition_snapshot', None)
         request = replace(request, metadata=data,
             before_inference=getattr(self._request_scope, 'before_inference', None))
-        if config.local_ai_model:
+        if needs_local:
             if self._local_runtime is None:
                 caps = ModelCapabilities(text=True, vision=config.local_ai_vision,
                     structured_output=config.local_ai_structured_output,
@@ -182,13 +202,47 @@ class LLMClient:
 
     def _cloud_http(self, transport=None, cancelled=None):
         def guard(request):
-            if cancelled and cancelled():
+            deadline = getattr(self._request_scope, 'transport_deadline', None)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise AnalysisError('AI request timed out.')
+            active_cancelled = getattr(self._request_scope, 'transport_cancelled', None) or cancelled
+            if active_cancelled and active_cancelled():
                 raise AnalysisError('AI request cancelled.')
             if self.config.private_mode or self.config.ai_execution_mode == 'local_only':
                 raise AnalysisError('The current policy blocks cloud AI.')
             self.policy.require_allowed(str(request.url), 'cloud_ai')
         return httpx.Client(transport=transport, follow_redirects=False,
+                            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
                             event_hooks={'request': [guard]})
+
+    @contextmanager
+    def _cloud_client(self, key, endpoint, timeout, cancelled, deadline=None):
+        deadline = deadline if deadline is not None else time.monotonic() + timeout
+        if timeout <= 0:
+            raise AnalysisError('AI request timed out.')
+        previous = getattr(self._request_scope, 'transport_cancelled', None)
+        previous_deadline = getattr(self._request_scope, 'transport_deadline', None)
+        self._request_scope.transport_cancelled = cancelled
+        self._request_scope.transport_deadline = deadline
+        def factory():
+            from openai import OpenAI
+            http = self._cloud_http()
+            try:
+                return OpenAI(api_key=key, base_url=endpoint, timeout=timeout,
+                              max_retries=0, http_client=http)
+            except Exception:
+                http.close()
+                raise
+        try:
+            with self._cloud_pool.lease((endpoint.rstrip('/'), key), factory) as client:
+                # Per-call options share the owned HTTP pool and are not closed here.
+                remaining = min(timeout, deadline - time.monotonic())
+                if remaining <= 0:
+                    raise AnalysisError('AI request timed out.')
+                yield client.with_options(timeout=remaining)
+        finally:
+            self._request_scope.transport_cancelled = previous
+            self._request_scope.transport_deadline = previous_deadline
 
     def request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
                      base_url=None, model=None, usage_operation=None,
@@ -198,6 +252,7 @@ class LLMClient:
         from src.observability.performance import emit
         prepared = time.perf_counter()
         request = AIRequest(prompt=prompt, task_type='contextual_reasoning' if mode == 'context' else 'text',
+            timeout_seconds=self._timeout_seconds(base_url),
             cancelled=cancelled or getattr(self._request_scope, 'cancelled', None),
             preferred_model=model, privacy_requirement=privacy_requirement,
             metadata={**(metadata or {}), **dict(mode=mode, system_prompt=system_prompt, operation=usage_operation or 'text',
@@ -206,7 +261,8 @@ class LLMClient:
              success=True, properties={'operation': 'request_prepare'})
         return self._execute(request, lambda req: self._cloud_request_text(req.prompt, mode,
             api_key=api_key, base_url=req.metadata['cloud_base_url'], model=req.preferred_model, usage_operation=usage_operation,
-            system_prompt=system_prompt, cancelled=req.cancelled), cloud_model=model, cloud_endpoint=base_url, validator=validator)
+            system_prompt=system_prompt, cancelled=req.cancelled, timeout_seconds=req.remaining_timeout,
+            deadline=req.deadline), cloud_model=model, cloud_endpoint=base_url, validator=validator)
 
     def request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
                       custom_prompt=None, history=None, model_override=None, usage_operation=None,
@@ -218,6 +274,7 @@ class LLMClient:
         if not image_bytes:
             raise AnalysisError('The screenshot is empty. Please capture again.')
         request = AIRequest(prompt=prompt, task_type='structured_extraction' if mode in ('skill', 'extract', 'debug') else 'vision',
+            timeout_seconds=self._timeout_seconds(),
             cancelled=cancelled or getattr(self._request_scope, 'cancelled', None),
             image_bytes=image_bytes, conversation=history or (), response_schema=response_schema,
             preferred_model=model_override, privacy_requirement=privacy_requirement,
@@ -229,6 +286,8 @@ class LLMClient:
         return self._execute(request, lambda req: self._cloud_request_image(req.image_bytes, req.prompt, mode,
             custom_prompt, history, req.preferred_model, usage_operation, cancelled=req.cancelled,
             base_url=req.metadata['cloud_base_url'],
+            timeout_seconds=req.remaining_timeout,
+            deadline=req.deadline,
             image_encoding=req.metadata.get('image_encoding', 'png')), cloud_model=model_override, validator=validator)
 
     def _record_usage(self, response, *, model, base_url, operation, started=None, failure=None):
@@ -269,8 +328,9 @@ class LLMClient:
 
     def _cloud_request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
                      base_url=None, model=None, usage_operation=None,
-                     system_prompt=None, cancelled=None) -> str:
+                     system_prompt=None, cancelled=None, timeout_seconds=None, deadline=None) -> str:
         """Use the configured provider for an explicit text-only Skill proposal."""
+        from openai import APIConnectionError, APIStatusError, APITimeoutError
         key = (os.getenv('AI_API_KEY', '') if api_key is None else api_key).strip()
         if not key:
             raise AnalysisError('AI API key is not configured. Open Settings to add your API key.')
@@ -285,9 +345,8 @@ class LLMClient:
             messages.append({'role': 'system', 'content': system_prompt})
         messages.append({'role': 'user', 'content': prompt})
         try:
-            with OpenAI(api_key=key, base_url=base_url,
-                        timeout=_request_timeout(base_url), max_retries=0,
-                        http_client=self._cloud_http(cancelled=cancelled)) as client:
+            with self._cloud_client(key, base_url,
+                    _request_timeout(base_url) if timeout_seconds is None else timeout_seconds, cancelled, deadline) as client:
                 response = client.chat.completions.create(model=model,
                     messages=messages,
                     max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192))
@@ -339,8 +398,10 @@ class LLMClient:
                       custom_prompt: str | None = None,
                       history: list[dict[str, str]] | None = None,
                       model_override: str | None = None,
-                      usage_operation: str | None = None, *, cancelled=None, image_encoding='png', base_url=None) -> str:
+                      usage_operation: str | None = None, *, cancelled=None, image_encoding='png', base_url=None,
+                      timeout_seconds=None, deadline=None) -> str:
         """Shared vision transport for workflow and standalone classification prompts."""
+        from openai import APIConnectionError, APIStatusError, APITimeoutError
         key = os.getenv("AI_API_KEY", "").strip()
         if not key:
             raise AnalysisError("AI API key is not configured. Open Settings to add your API key.")
@@ -371,9 +432,8 @@ class LLMClient:
             messages.append({'role': 'user', 'content': (custom_prompt or '').strip() or 'Explain this screenshot.'})
         started = time.perf_counter()
         try:
-            with OpenAI(api_key=key, base_url=base_url,
-                        timeout=_request_timeout(base_url), max_retries=0,
-                        http_client=self._cloud_http(cancelled=cancelled)) as client:
+            with self._cloud_client(key, base_url,
+                    _request_timeout(base_url) if timeout_seconds is None else timeout_seconds, cancelled, deadline) as client:
                 request = {
                     "model": model,
                     "messages": messages,

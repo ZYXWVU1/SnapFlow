@@ -84,8 +84,12 @@ class Config:
     desktop_clipboard_policy: str = 'disabled'
     desktop_blocked_apps: tuple[str, ...] = ()
     desktop_app_policies: dict = field(default_factory=dict)
+    controlled_desktop_actions_enabled: bool = False
+    desktop_target_highlight: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.controlled_desktop_actions_enabled) is not bool or type(self.desktop_target_highlight) is not bool:
+            raise ValueError('Desktop action settings must be true or false.')
         from src.desktop_context.permissions import validate_preferences
         validate_preferences(self.desktop_metadata_enabled, self.desktop_ui_policy,
             self.desktop_selection_policy, self.desktop_clipboard_policy,

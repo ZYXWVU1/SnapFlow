@@ -15,7 +15,7 @@ STEP_STATUSES = ('pending', 'ready', 'awaiting_approval', 'running', 'success', 
                  'skipped', 'blocked', 'cancelled', 'interrupted', 'verification_failed')
 STEP_TYPES = ('reason', 'retrieve_memory', 'read_context', 'run_skill', 'run_workflow',
               'call_action', 'call_mcp_tool', 'generate_text', 'compare_data', 'verify_result',
-              'request_user_input', 'save_to_memory')
+              'request_user_input', 'save_to_memory', 'desktop_action')
 RISKS = ('read_only', 'local_write', 'external_write', 'sensitive', 'destructive', 'unknown')
 APPROVAL_MODES = ('automatic_safe', 'approve_once', 'approve_at_execution', 'disabled')
 
@@ -110,13 +110,16 @@ class AgentConstraints(Contract):
     max_replans: int = 2
     max_runtime_minutes: int = 10
     allow_local_writes: bool = False
+    max_ui_actions: int = 20
+    max_external_commits: int = 2
 
     def __post_init__(self):
         for name in ('allow_external_writes', 'allow_remote_ai', 'allow_remote_mcp', 'allow_memory_search', 'allow_local_writes'):
             if type(getattr(self, name)) is not bool:
                 raise ValueError('Agent permissions must be booleans.')
         for name, low, high in (('max_steps', 1, 50), ('max_external_writes', 0, 10),
-                                ('max_ai_calls', 0, 50), ('max_replans', 0, 5), ('max_runtime_minutes', 1, 60)):
+                                ('max_ai_calls', 0, 50), ('max_replans', 0, 5), ('max_runtime_minutes', 1, 60),
+                                ('max_ui_actions', 0, 20), ('max_external_commits', 0, 2)):
             if type(getattr(self, name)) is not int or not low <= getattr(self, name) <= high:
                 raise ValueError('Invalid Agent budget.')
         _cost(self.max_estimated_cost)

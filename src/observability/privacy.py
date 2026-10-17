@@ -47,7 +47,8 @@ _SCHEMAS = {
         'embedding', 'mcp_connect', 'mcp_discovery', 'mcp_resource', 'mcp_prompt', 'queue_wait',
         'request_prepare', 'startup_migration', 'window_visible', 'mcp_interaction',
         'agent_context', 'agent_planning', 'agent_validation', 'agent_execution',
-        'agent_verification', 'agent_replanning')}),
+        'agent_verification', 'agent_replanning', 'desktop_target_resolution', 'desktop_capability_discovery',
+        'desktop_uia_execution', 'desktop_post_verification', 'desktop_overlay')}),
     'resource_sampled': ('performance', {'app_ram_mb': _NUMBER, 'cpu_percent': _NUMBER,
         'threads': _COUNT, 'workers': _COUNT, 'handles': _COUNT, 'queue_depth': _COUNT,
         'inference_queue_depth': _COUNT, 'mcp_connections': _COUNT, 'local_runtime_ram_mb': _NUMBER}),
@@ -58,13 +59,19 @@ _SCHEMAS = {
     'experiment_outcome': ('beta', {'experiment': ('feedback_wording',), 'variant': ('A', 'B'),
         'outcome': ('completed', 'cancelled', 'error')}),
 }
+for _event in ('desktop_action_requested', 'desktop_target_resolved', 'desktop_action_approved',
+               'desktop_action_completed', 'desktop_action_failed', 'desktop_action_verification_failed'):
+    _SCHEMAS[_event] = ('desktop_actions', {'action': ('focus', 'invoke', 'toggle', 'select', 'expand',
+        'collapse', 'set_value', 'set_range_value', 'scroll', 'scroll_into_view'),
+        'risk': ('ui_navigation', 'ui_local_edit', 'ui_external_edit', 'ui_external_commit',
+                 'ui_sensitive', 'ui_destructive', 'unknown')})
 for _event in ('agent_session_started', 'agent_plan_created', 'agent_plan_approved',
                'agent_step_started', 'agent_step_completed', 'agent_step_failed',
                'agent_replanned', 'agent_session_completed'):
     _SCHEMAS[_event] = ('agent', {'step_count': _AGENT_COUNT,
         'risk': ('read_only', 'local_write', 'external_write', 'sensitive', 'destructive', 'unknown')})
 _COMPONENTS = frozenset(('application', 'capture', 'ai_router', 'local_runtime', 'skill',
-                       'workflow', 'memory', 'context', 'mcp', 'integration', 'ui', 'beta', 'agent'))
+                       'workflow', 'memory', 'context', 'mcp', 'integration', 'ui', 'beta', 'agent', 'desktop_actions'))
 _ID = re.compile(r'[a-f0-9]{32}')
 
 

@@ -5,7 +5,7 @@ import threading
 import time
 import httpx
 import weakref
-from openai import OpenAI
+from contextlib import contextmanager
 
 from src.network_policy import get_network_policy, is_loopback_url
 from .models import AIResponse
@@ -30,6 +30,12 @@ class LocalOpenAICompatibleRuntime:
         self.capabilities, self.policy = capabilities, policy or get_network_policy()
         self._api_key = api_key or 'local-runtime'
         self.manager = manager
+        from .transport import ClientPool
+        self._clients = ClientPool(capacity=1)
+        self._health_lock = threading.Lock()
+        self._healthy_until = 0.0
+        self._closed = False
+        self._request_scope = threading.local()
         with self._slots_lock:
             self._slot = self._slots.get(self.endpoint)
             if self._slot is None:
@@ -38,34 +44,89 @@ class LocalOpenAICompatibleRuntime:
 
     def _http(self):
         def guard(request):
+            with self._health_lock:
+                if self._closed:
+                    raise ValueError('Local AI runtime is stopped.')
+            deadline = getattr(self._request_scope, 'deadline', None)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ValueError('AI request timed out.')
+            cancelled = getattr(self._request_scope, 'cancelled', None)
+            if cancelled and cancelled():
+                raise ValueError('AI request cancelled.')
             self.policy.require_allowed(str(request.url), 'local_ai' if self.local else 'cloud_ai')
         return httpx.Client(trust_env=False, follow_redirects=False,
+                            limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
                             event_hooks={'request': [guard]}, timeout=10)
 
-    def _sdk(self, timeout):
+    @contextmanager
+    def _sdk(self, timeout, *, deadline=None, cancelled=None):
+        deadline = deadline if deadline is not None else time.monotonic() + timeout
+        if timeout <= 0:
+            raise ValueError('AI request timed out.')
         self.policy.require_allowed(self.endpoint, 'local_ai' if self.local else 'cloud_ai')
-        return OpenAI(api_key=self._api_key, base_url=self.endpoint, max_retries=0,
-                      timeout=timeout, http_client=self._http())
-
-    def health_check(self):
+        def factory():
+            from openai import OpenAI
+            http = self._http()
+            try:
+                return OpenAI(api_key=self._api_key, base_url=self.endpoint, max_retries=0,
+                              timeout=timeout, http_client=http)
+            except Exception:
+                http.close()
+                raise
+        previous_deadline = getattr(self._request_scope, 'deadline', None)
+        previous_cancelled = getattr(self._request_scope, 'cancelled', None)
+        self._request_scope.deadline, self._request_scope.cancelled = deadline, cancelled
         try:
-            return self.model_id in self.list_models()
+            with self._clients.lease((self.endpoint, self._api_key), factory) as client:
+                remaining = min(timeout, deadline - time.monotonic())
+                if remaining <= 0:
+                    raise ValueError('AI request timed out.')
+                yield client.with_options(timeout=remaining)
+        finally:
+            self._request_scope.deadline, self._request_scope.cancelled = previous_deadline, previous_cancelled
+
+    def health_check_request(self, request):
+        return self.health_check(timeout=min(10, request.remaining_timeout),
+            deadline=min(request.deadline, time.monotonic() + 10), cancelled=request.cancelled)
+
+    def health_check(self, *, timeout=10, deadline=None, cancelled=None):
+        self.policy.require_allowed(self.endpoint, 'local_ai' if self.local else 'cloud_ai')
+        with self._health_lock:
+            if self._closed:
+                return False
+            if time.monotonic() < self._healthy_until:
+                return True
+        try:
+            return self.model_id in self.list_models(timeout=timeout, deadline=deadline, cancelled=cancelled)
         except Exception:
             return False
 
-    def list_models(self):
-        with self._sdk(10) as client:
-            return [model.id for model in client.models.list().data]
+    def list_models(self, *, timeout=10, deadline=None, cancelled=None):
+        try:
+            with self._sdk(timeout, deadline=deadline, cancelled=cancelled) as client:
+                models = [model.id for model in client.models.list().data]
+        except Exception:
+            with self._health_lock:
+                self._healthy_until = 0.0
+            raise
+        with self._health_lock:
+            if self._closed:
+                raise ValueError('Local AI runtime is stopped.')
+            self._healthy_until = time.monotonic() + 5 if self.model_id in models else 0.0
+        return models
 
     def get_capabilities(self):
         return self.capabilities
 
     def shutdown(self):
-        pass
+        with self._health_lock:
+            self._closed = True
+            self._healthy_until = 0.0
+        self._clients.close()
 
     def _generate(self, request):
         from .cancellation import run_cancellable
-        return run_cancellable(lambda: self._generate_blocking(request), request.cancelled, request.timeout_seconds)
+        return run_cancellable(lambda: self._generate_blocking(request), request.cancelled, request.remaining_timeout)
 
     def _generate_blocking(self, request):
         if not self.local and request.privacy_requirement in ('local_only', 'private'):
@@ -111,7 +172,7 @@ class LocalOpenAICompatibleRuntime:
             if request.response_schema:
                 payload['response_format'] = {'type': 'json_schema', 'json_schema': {
                     'name': 'snapflow_result', 'schema': request.response_schema}}
-            with self._sdk(request.timeout_seconds) as client:
+            with self._sdk(request.remaining_timeout, deadline=request.deadline, cancelled=request.cancelled) as client:
                 response = client.chat.completions.create(**payload)
             if request.cancelled and request.cancelled():
                 raise ValueError('AI request cancelled.')
@@ -129,6 +190,8 @@ class LocalOpenAICompatibleRuntime:
         except ValueError:
             raise
         except Exception:
+            with self._health_lock:
+                self._healthy_until = 0.0
             raise ValueError('Local AI could not complete this request. Check runtime health, model support and available memory in AI & Models.') from None
         finally:
             if managed_active:
@@ -166,6 +229,8 @@ class LocalOpenAICompatibleRuntime:
         except ValueError:
             raise
         except Exception:
+            with self._health_lock:
+                self._healthy_until = 0.0
             raise ValueError('Local embedding generation is unavailable. Keyword search remains available.') from None
         finally:
             if managed_active:

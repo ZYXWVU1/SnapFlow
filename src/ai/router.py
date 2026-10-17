@@ -48,6 +48,8 @@ class AIRuntimeRouter:
     def _check_cancel(self, request):
         if request.cancelled and request.cancelled():
             raise ValueError('AI request cancelled.')
+        if request.remaining_timeout <= 0:
+            raise ValueError('AI request timed out.')
 
     def _check_external(self, request, mode):
         if mode in ('automatic', 'prefer_local'):
@@ -122,7 +124,9 @@ class AIRuntimeRouter:
             try:
                 from .cancellation import run_cancellable
                 with trace('ai_health', 'ai_router'):
-                    if not run_cancellable(runtime.health_check, request.cancelled, min(request.timeout_seconds, 10)):
+                    health = getattr(runtime, 'health_check_request', None)
+                    if not run_cancellable(lambda health=health, runtime=runtime: health(request) if health else runtime.health_check(),
+                            request.cancelled, min(request.remaining_timeout, 10)):
                         raise ValueError('The selected runtime is offline or its model is not loaded.')
                 self._check_cancel(request)
                 if not runtime.local:

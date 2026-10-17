@@ -49,6 +49,10 @@ release/
 !/scripts/stress_phase13.py
 !/scripts/phase13_profile.py
 !/scripts/verify_phase13_installer.py
+!/scripts/benchmark_app.py
+!/scripts/audit_package.py
+!/scripts/benchmark_optimization.py
+!/scripts/verify_package.py
 
 # Local documentation, planning notes, and screenshots.
 /docs/

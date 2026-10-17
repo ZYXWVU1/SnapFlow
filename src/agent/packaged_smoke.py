@@ -115,7 +115,7 @@ def run_packaged_agent_smoke(app, controller):
     try:
         from .mission import AgentMissionService
         from .services import AgentServices
-        from .storage import AgentStore
+        from .ephemeral import DesktopAwareAgentStore as AgentStore
         from src.modes import ModeResult
         agent = controller.agent_controller
         page = agent.page

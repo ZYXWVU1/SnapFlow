@@ -39,6 +39,9 @@ class FeatureFlag:
 
 
 FLAGS = MappingProxyType({
+    'controlled_computer_use_v1': FeatureFlag('controlled_computer_use_v1', False, True, False, True,
+        'Controlled Desktop Actions', 'Review and approve structured actions in a selected Windows application.',
+        'Beta: foreground only, protected/destructive actions blocked, input fallback unavailable.'),
     'agent_missions_v1': FeatureFlag('agent_missions_v1', False, True, False, False,
         'Agent Missions', 'Plan, review, and explicitly run goal-based missions.',
         'Beta: read-only capabilities first; execution requires validated plans and approvals.'),

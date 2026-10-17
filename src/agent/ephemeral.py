@@ -76,6 +76,13 @@ class DesktopAwareAgentStore(AgentStore):
                     safe_output['success'] = output['success']
                 elif output.get('resource_id') or output.get('status') == 'success':
                     safe_output['success'] = True
+                # Preserve the closed desktop outcome, never control/value payloads.
+                # Clear/restart must not turn a dispatched uncertainty into failure.
+                if type(output.get('desktop_verified')) is bool and output.get('status') in (
+                        'success', 'verification_failed', 'interrupted', 'blocked', 'cancelled',
+                        'permission_denied', 'stale_target', 'target_not_found', 'target_ambiguous'):
+                    safe_output['desktop_verified'] = output['desktop_verified']
+                    safe_output['status'] = output['status']
             safe_evidence = {'verified': evidence.get('verified') is True,
                 'method': 'temporary_desktop_output', 'warnings': ['Desktop-derived details are temporary.']} if evidence else None
             super().set_step(plan_id, durable_id, status, output=safe_output, evidence=safe_evidence, invocation=invocation)

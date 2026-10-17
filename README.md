@@ -1,5 +1,7 @@
 # SnapFlow
 
+Phase 16 adds **Controlled Desktop Actions**, a disabled-by-default beta for reviewed semantic Windows UIA actions through Agent Missions. Exact window fences, action previews, once-only approval, fresh-state verification and uncertain-effect recovery are required. Raw input fallback is unavailable. See [the user guide](docs/USER_GUIDE.md), [architecture](docs/computer_use/ARCHITECTURE.md) and [Phase 16 qualification](docs/PHASE16_FINAL_REPORT.md).
+
 Phase 13 adds local reliability records, crash recovery and Safe Mode, performance timings, local beta features, feedback exports, Health Center, and release gates. The Windows candidate is `0.8.0-beta.2`; actual qualification and remaining blockers are recorded in [the Phase 13 report](docs/PHASE13_IMPLEMENTATION.md).
 
 Start with [the beta testing guide](docs/BETA_TESTING_GUIDE.md), [privacy and local analytics](docs/PRIVACY_ANALYTICS.md), [recovery guidance](docs/CRASH_RECOVERY.md), [known issues](docs/BETA_KNOWN_ISSUES.md), and [the release process](docs/RELEASE_PROCESS.md). Remote analytics are not implemented. Genuine local model inference and live providers require separate qualification; synthetic checks are identified in the report.

@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
 from uuid import uuid4
+import time
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class AIRequest:
     metadata: dict = field(default_factory=dict, repr=False)
     cancelled: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
     before_inference: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    deadline: float | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         import math
@@ -45,8 +47,16 @@ class AIRequest:
             raise ValueError('Unknown privacy requirement.')
         if type(self.timeout_seconds) not in (int, float) or not math.isfinite(self.timeout_seconds) or not 0 < self.timeout_seconds <= 600:
             raise ValueError('AI timeout must be within 600 seconds.')
+        if self.deadline is None:
+            object.__setattr__(self, 'deadline', time.monotonic() + self.timeout_seconds)
+        elif type(self.deadline) not in (int, float) or not math.isfinite(self.deadline):
+            raise ValueError('Invalid AI deadline.')
         if self.image_bytes is not None and (not isinstance(self.image_bytes, bytes) or len(self.image_bytes) > 32 * 1024 * 1024):
             raise ValueError('AI image is invalid or too large.')
+
+    @property
+    def remaining_timeout(self):
+        return max(0.0, self.deadline - time.monotonic())
 
 
 @dataclass(frozen=True)
