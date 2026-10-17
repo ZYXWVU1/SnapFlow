@@ -244,6 +244,11 @@ class AgentMissionService:
         def context(plan):
             return {'consumed': self.store.budget(session_id), 'step_states': self.store.step_states(old.plan_id)}
         try:
+            desktop_provider = getattr(self.services, 'desktop_action_provider', None)
+            if desktop_provider is not None:
+                desktop_provider.refresh_for_replan(session, old, self.store.step_states(old.plan_id),
+                    cancelled=cancelled or (lambda: False))
+                registry = self.services.registry(session, bundle)
             with inference_budget(self.services.client, lambda: self._charge_inference(session_id, dispatch)):
                 new = AgentPlanner(self.services.client, registry, validation_context=context).create_plan(session, bundle.prompt,
                     cancelled=dispatch, version=old.version + 1, supersedes_plan_id=old.plan_id, completed=completed)

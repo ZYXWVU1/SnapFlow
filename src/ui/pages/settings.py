@@ -27,6 +27,7 @@ class SettingsPage(ScrollPage):
     health_center_requested = Signal()
     beta_insights_requested = Signal()
     report_issue_requested = Signal()
+    desktop_actions_requested = Signal()
 
     def __init__(self, config=None, parent=None, *, paths=None):
         super().__init__(parent)
@@ -64,6 +65,15 @@ class SettingsPage(ScrollPage):
         self.theme_label = QLabel()
         appearance.content.addWidget(self.theme_label)
         self.content.addWidget(appearance)
+        desktop = Card()
+        desktop.content.addWidget(QLabel('Desktop Actions'))
+        desktop_note = QLabel('Review structured UI actions in a selected application. External commits always ask; input fallback is off.')
+        desktop_note.setWordWrap(True)
+        desktop.content.addWidget(desktop_note)
+        desktop_button = AppButton('Desktop Actions')
+        desktop_button.clicked.connect(self.desktop_actions_requested)
+        desktop.content.addWidget(desktop_button)
+        self.content.addWidget(desktop)
         privacy = Card()
         privacy.content.addWidget(QLabel('Privacy'))
         self.privacy_note = QLabel()

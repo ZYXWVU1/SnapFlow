@@ -28,7 +28,9 @@ class AgentVerifier:
     def verify(self, step, capability, output):
         rule = thaw(step.verification) if step.verification else {}
         method = rule.get('method', 'workflow_status' if capability.capability_type == 'run_workflow' else 'result_exists' if capability.side_effecting else 'schema')
-        if capability.capability_type == 'run_workflow':
+        if capability.capability_type == 'desktop_action':
+            method = 'desktop_postcondition'
+        elif capability.capability_type == 'run_workflow':
             method = 'workflow_status'
         elif capability.side_effecting:
             method = 'result_exists'
@@ -48,7 +50,12 @@ class AgentVerifier:
             except Exception:
                 verified = False
                 warnings.append('Expected output schema was not satisfied.')
-        if method in ('result_exists', 'resource_exists', 'tool_response'):
+        if method == 'desktop_postcondition':
+            verified = verified and output.get('desktop_verified') is True and output.get('status') == 'success'
+            evidence.append({'type': 'desktop_postcondition', 'verified': bool(verified)})
+            if not verified:
+                warnings.append('Desktop outcome is unverified. Review the UI before replanning; do not repeat the write.')
+        elif method in ('result_exists', 'resource_exists', 'tool_response'):
             field = 'resource_id' if capability.side_effecting else rule.get('field', 'resource_id')
             value = output.get(field) if isinstance(output, dict) else None
             verified = verified and type(value) in (str, int) and not isinstance(value, bool) and bool(value)

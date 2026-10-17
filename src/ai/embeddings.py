@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
+import heapq
 
 from src.memory.models import MemorySearchResult
 from src.network_policy import get_network_policy
@@ -166,22 +167,29 @@ class SemanticMemoryIndex:
             clauses.append('m.screenshot_path IS NOT NULL')
         if filters.get('has_structured_data'):
             clauses.append("m.structured_data_json<>'{}'")
-        with self.store._connect() as db:
-            rows = db.execute('SELECT m.*, e.vector FROM memory_embeddings e JOIN memory_records m ON m.id=e.memory_id WHERE '
-                + ' AND '.join(clauses) + ' ORDER BY m.id LIMIT 10000', args).fetchall()
-        ranked = []
-        for row in rows:
-            self._check_cancelled(cancelled)
-            try:
-                stored = self._normalize(json.loads(row['vector']))
-                score = sum(x * y for x, y in zip(vector, stored))
-            except (ValueError, TypeError, OverflowError):
-                continue
-            if score > 0:
-                ranked.append(MemorySearchResult(row['id'], row['title'],
-                    (row['description'] or row['searchable_text'])[:220], row['saved_at'],
-                    row['skill_id'], row['thumbnail_path'], score))
-        ranked.sort(key=lambda hit: (-hit.relevance_score, hit.memory_id))
+        def hits():
+            with self.store._connect() as db:
+                rows = db.execute('''SELECT m.id, m.title, m.saved_at, m.skill_id, m.thumbnail_path,
+                    substr(COALESCE(NULLIF(m.description, ''), m.searchable_text), 1, 220) AS snippet,
+                    e.vector FROM memory_embeddings e JOIN memory_records m ON m.id=e.memory_id WHERE '''
+                    + ' AND '.join(clauses) + ' ORDER BY m.id', args)
+                while True:
+                    self._check_cancelled(cancelled)
+                    batch = rows.fetchmany(128)
+                    if not batch:
+                        break
+                    for row in batch:
+                        self._check_cancelled(cancelled)
+                        try:
+                            stored = self._normalize(json.loads(row['vector']))
+                            score = sum(x * y for x, y in zip(vector, stored))
+                        except (ValueError, TypeError, OverflowError):
+                            continue
+                        if score > 0:
+                            yield MemorySearchResult(row['id'], row['title'], row['snippet'],
+                                row['saved_at'], row['skill_id'], row['thumbnail_path'], score)
+        # Retain only the requested prefix, with the existing deterministic ties.
+        ranked = heapq.nsmallest(offset + limit, hits(), key=lambda hit: (-hit.relevance_score, hit.memory_id))
         self._check_cancelled(cancelled)
         return ranked[offset:offset+limit]
 

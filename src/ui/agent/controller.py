@@ -39,7 +39,7 @@ class AgentController(QObject):
     def __init__(self, app_controller):
         super().__init__(app_controller)
         self.owner = app_controller
-        self.page = app_controller.main_window.pages['agent']
+        self._page = None
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.worker = None
@@ -47,19 +47,36 @@ class AgentController(QObject):
         self.session_id = None
         self.view_plan_id = None
         self.stopped = False
-        self.input_revision = digest(self.page.request_payload())
+        self.input_revision = None
         self.mission_revisions = {}
         self.pending_revision = None
         self.input_dialog = None
         self.progress_changed.connect(self._progress, Qt.ConnectionType.QueuedConnection)
         self.input_requested.connect(self._input, Qt.ConnectionType.QueuedConnection)
+        app_controller.main_window.page_created.connect(self._page_created)
+        page = app_controller.main_window.get_created_page('agent')
+        if page is not None:
+            self._bind_page(page)
+
+    @property
+    def page(self):
+        return self.owner.main_window.pages['agent']
+
+    def _page_created(self, key, page):
+        if key == 'agent':
+            self._bind_page(page)
+
+    def _bind_page(self, page):
+        if self._page is page:
+            return
+        self._page = page
         for widget in (self.page.goal,):
             widget.textChanged.connect(self._inputs_changed)
         self.page.mode.currentIndexChanged.connect(self._inputs_changed)
         self.page.include_current.toggled.connect(self._inputs_changed)
         self.page.include_conversation.toggled.connect(self._inputs_changed)
         self.page.include_desktop.toggled.connect(self._inputs_changed)
-        self.page.desktop_context_requested.connect(app_controller.desktop_controller.show)
+        self.page.desktop_context_requested.connect(self.owner.desktop_controller.show)
         self.page.memory_list.itemChanged.connect(self._inputs_changed)
         for widget in self.page.permissions.values():
             widget.toggled.connect(self._inputs_changed)
@@ -80,7 +97,7 @@ class AgentController(QObject):
         self.page.history_delete_requested.connect(self.delete_history)
         self.page.history_export_requested.connect(self.export_history)
         self.page.version_open_requested.connect(self.open_version)
-        self.page.enable_requested.connect(app_controller.open_beta_features)
+        self.page.enable_requested.connect(self.owner.open_beta_features)
         self.apply_defaults()
         self.refresh_enabled()
 
@@ -92,7 +109,7 @@ class AgentController(QObject):
         self.input_revision = digest(self.page.request_payload())
 
     def apply_defaults(self):
-        if self.session_id is None and not self.busy:
+        if self._page is not None and self.session_id is None and not self.busy:
             self.page.apply_defaults(self.owner.config)
             self._inputs_changed()
 
@@ -119,7 +136,8 @@ class AgentController(QObject):
             extension_service=self.owner.extension_service, workflow_bridge=self.owner.workflow_bridge,
             current_skill_result=lambda: self.owner.last_result, user_input=self.ask_user,
             current_image=lambda: self.owner.image_bytes,
-            desktop_validator=self.owner.desktop_controller.service.validate_sources)
+            desktop_validator=self.owner.desktop_controller.service.validate_sources,
+            desktop_action_provider=self.owner.desktop_actions_controller.provider)
         self.service = AgentMissionService(self.store, self.services, self.owner.execution_journal,
             progress=self.progress_changed.emit)
         self.service.additional_guard = self._guard
@@ -137,6 +155,8 @@ class AgentController(QObject):
             raise ValueError('Visual Memory permission was disabled.')
 
     def refresh_enabled(self):
+        if self._page is None:
+            return
         self.page.set_enabled(self._enabled())
         try:
             self._ensure()
@@ -256,6 +276,9 @@ class AgentController(QObject):
             capability = registry.get(step.capability_id)
             if capability is None or not capability.availability:
                 raise ValueError('The reviewed capability is unavailable.')
+            if capability.capability_type == 'desktop_action':
+                self.owner.desktop_actions_controller.preview_step(self, step, inputs)
+                return
             box = QMessageBox(self.page)
             box.setTextFormat(Qt.TextFormat.PlainText)
             box.setWindowTitle('Review one Agent step')
@@ -276,14 +299,21 @@ class AgentController(QObject):
 
     def execute(self):
         if self.session_id:
-            self._start(lambda _: self.service.execute(self.session_id))
+            def execute(cancelled):
+                plan = self.store.get_plan(self.store.get_session(self.session_id).current_plan_id)
+                if any(step.step_type == 'desktop_action' for step in plan.steps):
+                    self.owner.desktop_actions_controller.wait_for_target(cancelled)
+                return self.service.execute(self.session_id)
+            self._start(execute)
 
     def pause(self):
         if self.session_id and self.service:
+            self.owner.desktop_actions_controller.stop()
             self.service.pause(self.session_id)
             self.page.show_status('Pause requested. Paused after the current operation finishes.')
 
     def cancel(self):
+        self.owner.desktop_actions_controller.stop()
         if self.worker:
             self.worker.cancelled.set()
         if self.session_id and self.service:

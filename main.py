@@ -19,6 +19,14 @@ def main() -> int:
     phase13_smoke = ('--phase13-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE13_SMOKE') == '1')
     phase14_smoke = ('--phase14-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE14_SMOKE') == '1')
     phase15_smoke = ('--phase15-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE15_SMOKE') == '1')
+    phase16_smoke = ('--phase16-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE16_SMOKE') == '1')
+    if phase16_smoke:
+        from src.desktop_actions.packaged_smoke import install_smoke_isolation
+        try:
+            install_smoke_isolation()
+        except (ValueError, OSError):
+            print('Phase 16 smoke requires its disposable verification profile.', file=sys.stderr)
+            return 1
     if phase15_smoke:
         from src.desktop_context.packaged_smoke import install_smoke_isolation
         try:
@@ -36,7 +44,7 @@ def main() -> int:
     try:
         ensure_dependencies()
     except DependencyError as error:
-        if "--smoke-test" in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke:
+        if "--smoke-test" in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke:
             print(f"Startup smoke failed: {error}", file=sys.stderr)
             return 1
         show_dependency_error(error)
@@ -73,7 +81,7 @@ def main() -> int:
         report = classify_error(error)
         logging.getLogger(__name__).exception(
             "Application startup failed [%s] category=%s", report.reference_id, report.category)
-        if "--smoke-test" in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke:
+        if "--smoke-test" in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke:
             instance_guard.close()
             print(f"Startup smoke failed [{report.reference_id}]: {report.user_message}", file=sys.stderr)
             return 1
@@ -102,7 +110,7 @@ def main() -> int:
             return 1
 
     app.aboutToQuit.connect(instance_guard.close)
-    smoke = '--smoke-test' in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke
+    smoke = '--smoke-test' in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke
     safe_mode = '--safe-mode' in sys.argv
     diagnostics_requested = False
     if not smoke:
@@ -116,7 +124,7 @@ def main() -> int:
             if paths.recovery_database.exists():
                 from src.reliability.journal import ExecutionJournal
                 journal = ExecutionJournal(paths.recovery_database)
-                interrupted = sum(row['status'] in ('planned', 'started', 'interrupted', 'unknown')
+                interrupted = sum(row['status'] in ('planned', 'approved', 'started', 'action_sent', 'verification_started', 'interrupted', 'unknown')
                                   for row in journal.records(10000))
         except Exception:
             logging.getLogger(__name__).warning('Previous reliability state could not be inspected safely.')
@@ -151,7 +159,10 @@ def main() -> int:
     app.aboutToQuit.connect(controller.crash_reporter.uninstall)
     if diagnostics_requested:
         QTimer.singleShot(0, lambda: (controller.main_window.open_page('settings'), controller.main_window.show()))
-    if phase15_smoke:
+    if phase16_smoke:
+        from src.desktop_actions.packaged_smoke import run_packaged_action_smoke
+        QTimer.singleShot(0, lambda: run_packaged_action_smoke(app, controller))
+    elif phase15_smoke:
         from src.desktop_context.packaged_smoke import run_packaged_desktop_smoke
         QTimer.singleShot(0, lambda: run_packaged_desktop_smoke(app, controller))
     elif phase14_smoke:

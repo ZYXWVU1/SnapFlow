@@ -10,6 +10,8 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import threading
+import time
 
 from src.skills.custom.models import CustomSkillDefinition
 from .hardware import HardwareProfileService
@@ -30,15 +32,25 @@ def hardware_identity(profile):
     return 'hardware-sha256:' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode('utf-8')).hexdigest()
 
 
-def collect_resources():
+_hardware_lock = threading.Lock()
+_hardware_cache = None
+_hardware_expires = 0.0
+
+
+def collect_resources(*, refresh=False):
     """Return lightweight detected RAM and hardware identity, with safe unknowns."""
     resources = {'available_ram_mb': None, 'hardware_profile_id': None}
     try:
-        profile = HardwareProfileService().detect()
-        available = profile.available_ram_mb
+        global _hardware_cache, _hardware_expires
+        with _hardware_lock:
+            if refresh or _hardware_cache is None or time.monotonic() >= _hardware_expires:
+                profile = HardwareProfileService().detect()
+                _hardware_cache = hardware_identity(profile)
+                _hardware_expires = time.monotonic() + 60
+            resources['hardware_profile_id'] = _hardware_cache
+        _, available = HardwareProfileService._memory_mb()
         if type(available) is int and available >= 0:
             resources['available_ram_mb'] = available
-        resources['hardware_profile_id'] = hardware_identity(profile)
     except Exception:
         # Hardware discovery is optional and must not prevent inference.
         pass

@@ -15,6 +15,8 @@ from .verification import AgentVerifier
 def _returned_outcome(output):
     if not isinstance(output, dict):
         return 'unknown'
+    if 'desktop_verified' in output and output.get('status') in ('verification_failed', 'interrupted'):
+        return 'unknown'
     if output.get('success') is False:
         return 'failed'
     if output.get('success') is True or output.get('status') == 'success':

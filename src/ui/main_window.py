@@ -1,4 +1,6 @@
 """Navigable desktop shell around the existing capture and feature workflows."""
+from collections.abc import Mapping
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QScrollArea,
     QStackedWidget, QToolButton, QVBoxLayout, QWidget)
@@ -7,15 +9,6 @@ from src.app_version import APP_NAME
 from src.ui.design.components import AppButton, Badge, Card, PageHeader, ToastManager
 from src.ui.design.icons import icon
 from src.ui.design.tokens import SPACING
-from src.ui.pages.skills import SkillsPage
-from src.ui.pages.workflows import WorkflowsPage
-from src.ui.pages.history import HistoryPage
-from src.ui.pages.memory import MemoryPage
-from src.ui.agent.page import AgentPage
-from src.ui.pages.settings import SettingsPage
-from src.ui.integrations.integration_page import IntegrationPage
-from src.ui.evaluation.page import EvaluationPage
-from src.ui.extensions.extensions_page import ExtensionsPage
 
 
 PAGES = ('home', 'agent', 'memory', 'skills', 'workflows', 'integrations', 'extensions', 'evaluation', 'history', 'settings')
@@ -31,7 +24,28 @@ _PAGE_COPY = {
 }
 
 
+class _PageMap(Mapping):
+    """Known keys stay discoverable while indexed access creates a page once."""
+    def __init__(self, window):
+        self.window = window
+
+    def __getitem__(self, key):
+        if key not in PAGES:
+            raise KeyError(key)
+        return self.window._ensure_page(key)
+
+    def __iter__(self):
+        return iter(PAGES)
+
+    def __len__(self):
+        return len(PAGES)
+
+    def __contains__(self, key):
+        return key in PAGES
+
+
 class MainWindow(QMainWindow):
+    page_created = Signal(str, object)
     capture_requested = Signal()
     feature_requested = Signal(str)
     integration_connect_requested = Signal(str)
@@ -58,7 +72,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, hotkey, parent=None, *, skills_storage=None, workflows_storage=None,
                  history=None, config=None, integration_registry=None, connection_storage=None, paths=None,
-                 memory_store=None, extension_service=None):
+                 memory_store=None, extension_service=None, page_configurator=None):
         super().__init__(parent)
         import time
         self._constructed_at = time.perf_counter()
@@ -71,6 +85,13 @@ class MainWindow(QMainWindow):
         self.history, self.config = history, config
         self.paths = paths
         self.connection_storage = connection_storage
+        self.memory_store = memory_store
+        self.integration_registry = integration_registry
+        self.extension_service = extension_service
+        self._page_configurator = page_configurator
+        self._created_pages = {}
+        self._private = bool(config and config.private_mode)
+        self._hotkey = hotkey
         root = QWidget()
         self.setCentralWidget(root)
         row = QHBoxLayout(root)
@@ -111,70 +132,110 @@ class MainWindow(QMainWindow):
         row.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
-        self.pages = {}
+        self.pages = _PageMap(self)
         self.launch_buttons = {}
-        for page in PAGES:
-            if page == 'home':
-                widget = self._build_home(hotkey)
-            elif page == 'agent':
-                widget = AgentPage(memory_store)
-            elif page == 'memory' and memory_store is not None:
-                widget = MemoryPage(memory_store)
-                widget.memory_open_requested.connect(self.memory_open_requested)
-                widget.agent_requested.connect(self.agent_from_memory_requested)
-                widget.ask_requested.connect(self.memory_ask_requested)
-                widget.capture_requested.connect(self.capture_requested)
-            elif page == 'skills':
-                widget = SkillsPage(skills_storage)
-                widget.manage_requested.connect(lambda: self.feature_requested.emit('skills'))
-                widget.edit_requested.connect(self.skill_edit_requested)
-                widget.test_requested.connect(self.skill_test_requested)
-                self.launch_buttons[page] = widget.manage_button
-            elif page == 'workflows':
-                widget = WorkflowsPage(workflows_storage)
-                widget.manage_requested.connect(lambda: self.feature_requested.emit('workflows'))
-                widget.edit_requested.connect(self.workflow_edit_requested)
-                widget.test_requested.connect(self.workflow_test_requested)
-                self.launch_buttons[page] = widget.manage_button
-            elif page == 'history':
-                widget = HistoryPage(history)
-            elif page == 'evaluation':
-                widget = EvaluationPage(skills_storage, workflows_storage)
-                widget.open_skills_requested.connect(lambda: self.feature_requested.emit('skills'))
-            elif page == 'integrations' and integration_registry is not None:
-                widget = IntegrationPage(integration_registry, connection_storage)
-                widget.connection_requested.connect(self.integration_connect_requested)
-                widget.test_requested.connect(self.integration_test_requested)
-                widget.disconnect_requested.connect(self.integration_disconnect_requested)
-            elif page == 'settings':
-                widget = SettingsPage(config, paths=paths)
-                widget.edit_requested.connect(lambda: self.feature_requested.emit('settings'))
-                widget.backup_export_requested.connect(self.backup_export_requested)
-                widget.backup_restore_requested.connect(self.backup_restore_requested)
-                widget.open_data_folder_requested.connect(self.open_data_folder_requested)
-                widget.storage_usage_requested.connect(self.storage_usage_requested)
-                widget.support_bundle_requested.connect(self.support_bundle_requested)
-                widget.health_check_requested.connect(self.health_check_requested)
-                widget.usage_summary_requested.connect(self.usage_summary_requested)
-                widget.update_check_requested.connect(self.update_check_requested)
-                widget.onboarding_requested.connect(self.onboarding_requested)
-                widget.memory_rebuild_requested.connect(self.memory_rebuild_requested)
-                widget.ai_runtime_requested.connect(self.ai_runtime_requested)
-                self.launch_buttons[page] = widget.edit_button
-            elif page == 'extensions' and extension_service is not None:
-                widget = ExtensionsPage(extension_service)
-            else:
-                widget = self._build_feature_page(page)
-            self.pages[page] = widget
-            self.stack.addWidget(widget)
         row.addWidget(self.stack, 1)
         self.toast = ToastManager(root)
         self.open_page('home')
         self._update_navigation()
         self.set_privacy_state(bool(config and config.private_mode))
 
+    def get_created_page(self, key):
+        """Inspect lifecycle state without activating an optional feature."""
+        return self._created_pages.get(key)
+
+    def refresh_created_page(self, key):
+        page = self.get_created_page(key)
+        if page is not None and hasattr(page, 'refresh'):
+            page.refresh()
+
+    def _ensure_page(self, page):
+        existing = self.get_created_page(page)
+        if existing is not None:
+            return existing
+        widget = self._build_page(page)
+        try:
+            if page == 'agent':
+                widget.set_privacy_state(self._private)
+            if self._page_configurator is not None:
+                self._page_configurator(page, widget)
+        except Exception:
+            self.launch_buttons.pop(page, None)
+            widget.deleteLater()
+            raise
+        self._created_pages[page] = widget
+        self.stack.addWidget(widget)
+        self.page_created.emit(page, widget)
+        return widget
+
+    def _build_page(self, page):
+        if page == 'home':
+            widget = self._build_home(self._hotkey)
+        elif page == 'agent':
+            from src.ui.agent.page import AgentPage
+            widget = AgentPage(self.memory_store)
+        elif page == 'memory' and self.memory_store is not None:
+            from src.ui.pages.memory import MemoryPage
+            widget = MemoryPage(self.memory_store)
+            widget.memory_open_requested.connect(self.memory_open_requested)
+            widget.agent_requested.connect(self.agent_from_memory_requested)
+            widget.ask_requested.connect(self.memory_ask_requested)
+            widget.capture_requested.connect(self.capture_requested)
+        elif page == 'skills':
+            from src.ui.pages.skills import SkillsPage
+            widget = SkillsPage(self.skills_storage)
+            widget.manage_requested.connect(lambda: self.feature_requested.emit('skills'))
+            widget.edit_requested.connect(self.skill_edit_requested)
+            widget.test_requested.connect(self.skill_test_requested)
+            self.launch_buttons[page] = widget.manage_button
+        elif page == 'workflows':
+            from src.ui.pages.workflows import WorkflowsPage
+            widget = WorkflowsPage(self.workflows_storage)
+            widget.manage_requested.connect(lambda: self.feature_requested.emit('workflows'))
+            widget.edit_requested.connect(self.workflow_edit_requested)
+            widget.test_requested.connect(self.workflow_test_requested)
+            self.launch_buttons[page] = widget.manage_button
+        elif page == 'history':
+            from src.ui.pages.history import HistoryPage
+            widget = HistoryPage(self.history)
+        elif page == 'evaluation':
+            from src.ui.evaluation.page import EvaluationPage
+            widget = EvaluationPage(self.skills_storage, self.workflows_storage)
+            widget.open_skills_requested.connect(lambda: self.feature_requested.emit('skills'))
+        elif page == 'integrations' and self.integration_registry is not None:
+            from src.ui.integrations.integration_page import IntegrationPage
+            widget = IntegrationPage(self.integration_registry, self.connection_storage)
+            widget.connection_requested.connect(self.integration_connect_requested)
+            widget.test_requested.connect(self.integration_test_requested)
+            widget.disconnect_requested.connect(self.integration_disconnect_requested)
+        elif page == 'settings':
+            from src.ui.pages.settings import SettingsPage
+            widget = SettingsPage(self.config, paths=self.paths)
+            widget.edit_requested.connect(lambda: self.feature_requested.emit('settings'))
+            widget.backup_export_requested.connect(self.backup_export_requested)
+            widget.backup_restore_requested.connect(self.backup_restore_requested)
+            widget.open_data_folder_requested.connect(self.open_data_folder_requested)
+            widget.storage_usage_requested.connect(self.storage_usage_requested)
+            widget.support_bundle_requested.connect(self.support_bundle_requested)
+            widget.health_check_requested.connect(self.health_check_requested)
+            widget.usage_summary_requested.connect(self.usage_summary_requested)
+            widget.update_check_requested.connect(self.update_check_requested)
+            widget.onboarding_requested.connect(self.onboarding_requested)
+            widget.memory_rebuild_requested.connect(self.memory_rebuild_requested)
+            widget.ai_runtime_requested.connect(self.ai_runtime_requested)
+            self.launch_buttons[page] = widget.edit_button
+        elif page == 'extensions' and self.extension_service is not None:
+            from src.ui.extensions.extensions_page import ExtensionsPage
+            widget = ExtensionsPage(self.extension_service)
+        else:
+            widget = self._build_feature_page(page)
+        return widget
+
     def set_privacy_state(self, private):
-        self.pages['agent'].set_privacy_state(private)
+        self._private = bool(private)
+        agent = self.get_created_page('agent')
+        if agent is not None:
+            agent.set_privacy_state(self._private)
         self.privacy_indicator.setText('PRIVATE MODE · Local' if private else 'AI & Models')
         self.privacy_indicator.setToolTip('Local processing; external network operations blocked.' if private else 'Configure AI execution and privacy.')
 
@@ -261,17 +322,17 @@ class MainWindow(QMainWindow):
     def open_page(self, page):
         if page not in self.pages:
             raise ValueError('Unknown page.')
+        widget = self.pages[page]
         self.current_page = page
         from src.observability.performance import emit
         emit('feature_visited', component='ui', properties={'feature': page})
-        widget = self.pages[page]
         if page == 'home':
             self._refresh_home()
         elif page == 'settings':
             widget.refresh(self.config)
         elif page in ('memory', 'skills', 'workflows', 'evaluation', 'history', 'integrations') and hasattr(widget, 'refresh'):
             widget.refresh()
-        self.stack.setCurrentWidget(self.pages[page])
+        self.stack.setCurrentWidget(widget)
         for key, button in self.nav_buttons.items():
             button.setChecked(key == page)
 

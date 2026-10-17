@@ -53,7 +53,7 @@ class AgentPlanValidator:
         if [s.order for s in plan.steps] != list(range(1, len(plan.steps) + 1)):
             errors.append('Steps must use consecutive dependency-safe order.')
         preceding, ancestry = set(), {}
-        writes = ai_calls = 0
+        writes = ai_calls = ui_actions = ui_commits = 0
         costs = []
         consumed, step_states = consumed or {}, step_states or {}
         for step in plan.steps:
@@ -70,6 +70,9 @@ class AgentPlanValidator:
                 errors.append('Unsupported input binding.')
             preceding.add(step.step_id)
             capability = self.registry.get(step.capability_id)
+            if step.capability_id in getattr(self.registry, 'historical_capabilities', ()) and not (
+                    step_states.get(step.step_id, {}).get('attempted') or step_states.get(step.step_id, {}).get('status') == 'success'):
+                errors.append('A completed or attempted desktop capability cannot be scheduled again.')
             if capability is None or not capability.availability:
                 errors.append('Capability is unavailable or unregistered.')
                 continue
@@ -80,7 +83,7 @@ class AgentPlanValidator:
             if approval_mode(capability) == 'disabled':
                 errors.append('Unclassified or destructive capability is disabled.')
             if capability.side_effecting and step.verification:
-                required = 'workflow_status' if step.step_type == 'run_workflow' else 'result_exists'
+                required = 'desktop_postcondition' if step.step_type == 'desktop_action' else 'workflow_status' if step.step_type == 'run_workflow' else 'result_exists'
                 if step.verification.get('method', required) != required or step.verification.get('field', 'resource_id') != 'resource_id':
                     errors.append('Write verification cannot be weakened by the plan.')
             if step.capability_id in policy.forbidden_capabilities:
@@ -94,6 +97,10 @@ class AgentPlanValidator:
                     writes += 1
                 if not policy.allow_external_writes:
                     errors.append('External writes are forbidden by current policy.')
+            if step.step_type == 'desktop_action':
+                ui_actions += 1
+                if step.capability_id.startswith('desktop:invoke:') and capability.risk_level == 'external_write':
+                    ui_commits += 1
             if capability.risk_level == 'local_write' and not policy.allow_local_writes:
                 errors.append('Local writes are forbidden by goal constraints.')
             if getattr(capability, 'remote', False):
@@ -110,6 +117,8 @@ class AgentPlanValidator:
                 errors.append('Invalid capability input schema or bindings.')
         if writes + consumed.get('writes', 0) > policy.max_external_writes:
             errors.append('Plan exceeds the external write budget.')
+        if ui_actions > policy.max_ui_actions or ui_commits > policy.max_external_commits:
+            errors.append('Plan exceeds the desktop action or commit budget.')
         if ai_calls + consumed.get('ai_calls', 0) > policy.max_ai_calls:
             errors.append('Plan exceeds the AI call budget.')
         estimate = sum(costs) if all(c is not None for c in costs) else None

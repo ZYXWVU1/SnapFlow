@@ -4,7 +4,7 @@ from threading import RLock
 class SafetyPolicy:
     _RESTRICTED = frozenset(('external_write', 'workflow_auto', 'mcp_auto', 'model_preload',
                             'cloud_fallback', 'extension_server', 'beta_feature', 'agent_execution', 'agent_resume',
-                            'desktop_assistance', 'desktop_uia'))
+                            'desktop_assistance', 'desktop_uia', 'desktop_actions', 'desktop_input_fallback'))
     _CORE = frozenset(('backup', 'diagnostics', 'settings', 'memory_inspection', 'skill_inspection'))
 
     def __init__(self):
