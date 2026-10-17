@@ -19,9 +19,12 @@ class DesktopTargetResolver:
                 continue
             if target.ancestor_path and element.ancestor_path != target.ancestor_path:
                 continue
+            if not set(target.required_actions) <= set(element.capabilities.actions) or not set(target.required_patterns) <= set(element.capabilities.patterns):
+                continue
             score = .35 + (.3 if target.automation_id else 0) + (.2 if target.name else 0)
             score += .1 if target.ancestor_path else 0
             score += .05 if target.class_name else 0
+            score += .1 if target.required_actions and target.required_patterns else 0
             scored.append((min(1.0, score), element))
         candidates = tuple(e for _, e in sorted(scored, key=lambda pair: pair[0], reverse=True))
         if not candidates:

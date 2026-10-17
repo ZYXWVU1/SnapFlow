@@ -60,12 +60,20 @@ class DesktopTarget(Contract):
     bounds_hint: tuple | None = None
     source_snapshot_id: str | None = None
     source_element_id: str | None = None
+    required_actions: tuple[str, ...] = ()
+    required_patterns: tuple[str, ...] = ()
 
     def __post_init__(self):
         for key in ('process_name', 'window_title_hint', 'control_type', 'automation_id', 'name',
                     'class_name', 'runtime_id_hint', 'source_snapshot_id', 'source_element_id'):
             text(getattr(self, key), optional=True)
         object.__setattr__(self, 'ancestor_path', tuple(self.ancestor_path))
+        object.__setattr__(self, 'required_actions', tuple(self.required_actions))
+        object.__setattr__(self, 'required_patterns', tuple(self.required_patterns))
+        if not set(self.required_actions) <= set(ACTIONS) or len(self.required_patterns) > 10:
+            raise ValueError('Invalid required control capabilities.')
+        for pattern in self.required_patterns:
+            text(pattern, 100)
         if len(self.ancestor_path) > 8:
             raise ValueError('Target ancestry exceeds the limit.')
         for part in self.ancestor_path:

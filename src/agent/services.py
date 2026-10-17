@@ -56,7 +56,8 @@ class AgentServices:
     def __init__(self, memory_store, client, *, current_result, screenshot_reference,
             config_provider, skill_registry=None, workflow_storage=None,
             integration_service=None, extension_service=None, workflow_bridge=None, current_skill_result=None,
-            user_input=None, current_image=None, desktop_validator=None, desktop_action_provider=None):
+            user_input=None, current_image=None, desktop_validator=None, desktop_action_provider=None,
+            automation_provider=None):
         self.memory_store, self.client = memory_store, client
         self.current_result, self.screenshot_reference = current_result, screenshot_reference
         self.config_provider = config_provider
@@ -67,6 +68,7 @@ class AgentServices:
         self.user_input, self.current_image = user_input, current_image
         self.desktop_validator = desktop_validator
         self.desktop_action_provider = desktop_action_provider
+        self.automation_provider = automation_provider
 
     def validate_sources(self, bundle):
         """Fail closed when a selected Memory or current capture no longer matches."""
@@ -272,6 +274,8 @@ class AgentServices:
         self._register_mcp(registry, session, boundary)
         if self.desktop_action_provider is not None:
             self.desktop_action_provider.register(registry, session, bundle)
+        if self.automation_provider is not None:
+            self.automation_provider.register(registry, session, bundle)
         return registry
 
     def _register_skills(self, registry, session, boundary):

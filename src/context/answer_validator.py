@@ -1,5 +1,6 @@
 """Reject response sentences with missing or unrecognized source references."""
 import re
+from src.citations import cited_sentences
 
 
 _REF = re.compile(r'\[((?:MCP|[A-Za-z])\d+)\]')
@@ -11,7 +12,7 @@ def validate_answer(response, sources):
     by_id = {source.source_id: source for source in sources}
     kept = []
     used = set()
-    for sentence in re.split(r'(?<=[.!?])\s+|\n+', response.strip()):
+    for sentence in cited_sentences(response):
         cited = set(_REF.findall(sentence))
         amounts = [amount.replace(',', '') for amount in _MONEY.findall(sentence)]
         supported_amounts = cited <= allowed and all(any(re.search(r'(?<!\d)' + re.escape(amount) + r'(?!\d)',

@@ -65,6 +65,9 @@ for _event in ('desktop_action_requested', 'desktop_target_resolved', 'desktop_a
         'collapse', 'set_value', 'set_range_value', 'scroll', 'scroll_into_view'),
         'risk': ('ui_navigation', 'ui_local_edit', 'ui_external_edit', 'ui_external_commit',
                  'ui_sensitive', 'ui_destructive', 'unknown')})
+for _event in ('teach_session_started', 'teach_session_finished', 'demo_steps_inferred',
+               'automation_skill_created', 'automation_skill_tested', 'automation_skill_run', 'automation_skill_repair_required'):
+    _SCHEMAS[_event] = ('skill', {'step_count': _AGENT_COUNT})
 for _event in ('agent_session_started', 'agent_plan_created', 'agent_plan_approved',
                'agent_step_started', 'agent_step_completed', 'agent_step_failed',
                'agent_replanned', 'agent_session_completed'):

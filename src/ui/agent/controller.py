@@ -137,7 +137,8 @@ class AgentController(QObject):
             current_skill_result=lambda: self.owner.last_result, user_input=self.ask_user,
             current_image=lambda: self.owner.image_bytes,
             desktop_validator=self.owner.desktop_controller.service.validate_sources,
-            desktop_action_provider=self.owner.desktop_actions_controller.provider)
+            desktop_action_provider=self.owner.desktop_actions_controller.provider,
+            automation_provider=self.owner.automation_controller)
         self.service = AgentMissionService(self.store, self.services, self.owner.execution_journal,
             progress=self.progress_changed.emit)
         self.service.additional_guard = self._guard

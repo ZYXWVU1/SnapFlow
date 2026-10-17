@@ -2,13 +2,14 @@
 from dataclasses import dataclass
 import json
 import re
+from src.citations import cited_sentences
 
 
 _STOP_WORDS = {'which', 'what', 'when', 'where', 'who', 'how', 'the', 'and', 'for',
                'from', 'that', 'this', 'with', 'saved', 'memory', 'memories',
                'find', 'show', 'list', 'mention', 'mentions', 'did', 'does', 'are',
                'were', 'have', 'has', 'about', 'please', 'all'}
-_REF = re.compile(r'\[M\d+\]')
+_REF = re.compile(r'\[(?:MCP|[A-Za-z])\d+\]')
 _PRIVATE_FIELD = re.compile(r'(password|passphrase|api.?key|secret|credential|access.?token)', re.I)
 
 
@@ -82,7 +83,7 @@ class MemoryRecallService:
                                             usage_operation='memory_recall',
                                             system_prompt=system_prompt)
         allowed = {'[' + source.reference + ']' for source in sources}
-        sentences = re.split(r'(?<=[.!?])\s+|\n+', response.strip())
+        sentences = cited_sentences(response)
         verified = []
         used = set()
         for sentence in sentences:

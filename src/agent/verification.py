@@ -28,7 +28,7 @@ class AgentVerifier:
     def verify(self, step, capability, output):
         rule = thaw(step.verification) if step.verification else {}
         method = rule.get('method', 'workflow_status' if capability.capability_type == 'run_workflow' else 'result_exists' if capability.side_effecting else 'schema')
-        if capability.capability_type == 'desktop_action':
+        if capability.capability_type == 'desktop_action' or capability.source.startswith('automation_skill:'):
             method = 'desktop_postcondition'
         elif capability.capability_type == 'run_workflow':
             method = 'workflow_status'

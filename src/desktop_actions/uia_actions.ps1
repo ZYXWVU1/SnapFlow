@@ -145,6 +145,86 @@ public static class SnapFlowActions {
         return new Dictionary<string, object> {{"pid", pid}, {"hwnd", hwnd}, {"process_name", process},
             {"foreground", GetForegroundWindow().ToInt64()}, {"elements", elements}, {"complete", complete}, {"limit_reason", limitedReason}, {"security_available", true}};
     }
+    // Scoped teaching events carry semantic state only. No keyboard/clipboard hooks.
+    public static void Observe(long hwnd, int pid) {
+        var initial = Capture(hwnd, pid);
+        if (!complete) throw new InvalidOperationException();
+        var root = AutomationElement.FromHandle(new IntPtr(hwnd));
+        var queue = new System.Collections.Concurrent.ConcurrentQueue<Tuple<AutomationElement, bool, string>>();
+        int lost = 0;
+        AutomationPropertyChangedEventHandler changed = (sender, args) => {
+            if (queue.Count < 128) queue.Enqueue(Tuple.Create(sender as AutomationElement, false, DateTime.UtcNow.ToString("o")));
+            else System.Threading.Interlocked.Exchange(ref lost, 1);
+        };
+        AutomationEventHandler invoked = (sender, args) => {
+            if (queue.Count < 128) queue.Enqueue(Tuple.Create(sender as AutomationElement, true, DateTime.UtcNow.ToString("o")));
+            else System.Threading.Interlocked.Exchange(ref lost, 1);
+        };
+        var prior = new Dictionary<string, Dictionary<string, object>>();
+        foreach (var item in elements) prior[(string)item["element_id"]] = item;
+        var stop = System.Threading.Tasks.Task.Factory.StartNew(() => Console.In.ReadLine());
+        try {
+            Automation.AddAutomationPropertyChangedEventHandler(root, TreeScope.Subtree, changed,
+                TogglePattern.ToggleStateProperty, ValuePattern.ValueProperty,
+                SelectionItemPattern.IsSelectedProperty, ExpandCollapsePattern.ExpandCollapseStateProperty,
+                RangeValuePattern.ValueProperty, ScrollPattern.HorizontalScrollPercentProperty,
+                ScrollPattern.VerticalScrollPercentProperty);
+            Automation.AddAutomationEventHandler(InvokePattern.InvokedEvent, root, TreeScope.Subtree, invoked);
+            foreach (var item in elements) {
+                Console.WriteLine(json.Serialize(new Dictionary<string, object> {{"baseline", item}, {"process_name", initial["process_name"]}}));
+            }
+            Console.WriteLine(json.Serialize(new Dictionary<string, object> {{"ready", true}})); Console.Out.Flush();
+            var lifetime = Stopwatch.StartNew();
+            while (!stop.IsCompleted && lifetime.Elapsed.TotalMinutes < 10) {
+                System.Threading.Thread.Sleep(100);
+                if (!Security(hwnd, pid)) break;
+                if (lost != 0) {
+                    Console.WriteLine("{\"error\":\"native_trace_incomplete\"}"); Console.Out.Flush(); break;
+                }
+                Tuple<AutomationElement, bool, string> entry;
+                int budget = 0;
+                while (budget++ < 32 && queue.TryDequeue(out entry)) {
+                    try {
+                        if (GetForegroundWindow().ToInt64() != hwnd || entry.Item1 == null) continue;
+                        var e = entry.Item1;
+                        if (e.Current.ProcessId != pid) continue;
+                        var path = new List<string>(); var risk = new List<string>();
+                        var parent = walker.GetParent(e); bool scoped = false, sensitive = Protected(e);
+                        for (int hop = 0; parent != null && hop < 8; hop++) {
+                            if (parent.Current.ProcessId != pid) break;
+                            sensitive |= Protected(parent);
+                            if (sensitive) break;
+                            path.Insert(0, Signature(parent)); risk.Insert(0, Bound(parent.Current.Name, 500));
+                            if (parent.Current.NativeWindowHandle == hwnd) { scoped = true; break; }
+                            parent = walker.GetParent(parent);
+                        }
+                        if (sensitive) {
+                            Console.WriteLine(json.Serialize(new Dictionary<string, object> {{"protected", true}})); Console.Out.Flush(); continue;
+                        }
+                        if (!scoped || GetForegroundWindow().ToInt64() != hwnd) continue;
+                        var current = Describe(e, pid, hwnd, path, risk);
+                        // A late provider read cannot publish after foreground/security changed.
+                        if (GetForegroundWindow().ToInt64() != hwnd || !Security(hwnd, pid)) continue;
+                        string id = (string)current["element_id"];
+                        Dictionary<string, object> previous;
+                        bool unknown = !prior.TryGetValue(id, out previous);
+                        if (unknown) { previous = new Dictionary<string, object>(current); previous["state"] = new Dictionary<string, object>(); }
+                        prior[id] = current;
+                        if (Same(previous, current) && !entry.Item2) continue;
+                        Console.WriteLine(json.Serialize(new Dictionary<string, object> {
+                            {"before", previous}, {"after", current}, {"invoked", entry.Item2}, {"timestamp", entry.Item3},
+                            {"unknown_before", unknown}, {"process_name", initial["process_name"]}}));
+                        Console.Out.Flush();
+                        if (prior.Count > 500) { prior.Clear(); references.Clear(); }
+                    } catch { System.Threading.Interlocked.Exchange(ref lost, 1); }
+                }
+            }
+        } finally {
+            Automation.RemoveAutomationPropertyChangedEventHandler(root, changed);
+            Automation.RemoveAutomationEventHandler(InvokePattern.InvokedEvent, root, invoked);
+            references.Clear(); prior.Clear();
+        }
+    }
     static bool Same(object a, object b) { return json.Serialize(a) == json.Serialize(b); }
     static void RequireForeground(long hwnd, int pid) {
         if (!Security(hwnd, pid) || GetForegroundWindow().ToInt64() != hwnd) throw new UnauthorizedAccessException();
@@ -258,6 +338,9 @@ try {
         $result = [SnapFlowActions]::Capture([long]$request.hwnd, [int]$request.pid)
     } elseif ($request.operation -eq 'execute') {
         $result = [SnapFlowActions]::Execute([long]$request.hwnd, [int]$request.pid, [string]$request.action, $line)
+    } elseif ($request.operation -eq 'observe') {
+        [SnapFlowActions]::Observe([long]$request.hwnd, [int]$request.pid)
+        exit 0
     } else { throw 'Invalid operation' }
     $result | ConvertTo-Json -Depth 16 -Compress
 } catch {

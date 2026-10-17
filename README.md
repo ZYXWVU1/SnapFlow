@@ -149,3 +149,7 @@ The pinned offline regression runner isolates test modules and denies external s
 Permission-controlled Windows app/window metadata, read-only bounded UI Automation and selected text now feed the existing Context Assistant and Agent. Clipboard requires explicit consent and defaults to disabled. Filtered source preview/removal, temporary Agent plans/results, Private/Safe Mode boundaries and visibly stoppable local Assistance Sessions preserve the existing approval model. No desktop input automation or background screenshot history is introduced.
 
 See [Phase 15 implementation/evidence](docs/PHASE15_FINAL_REPORT.md), [architecture](docs/desktop/DESKTOP_CONTEXT_ARCHITECTURE.md), [privacy](docs/desktop/PRIVACY_MODEL.md) and [Assistance Sessions](docs/desktop/PROACTIVE_ASSISTANCE.md). Qualification status and remaining manual/release gates are recorded in the Phase 15 final report; earlier regression evidence is retained rather than rerun.
+
+### Demonstration Automation (Phase 17 Beta)
+
+Open **Automation Skills** from the tray or Visual Skills to explicitly teach a selected-window task. Review semantic steps, choose inputs, dry run, approve a verified test and publish an immutable local version. Replays retain Phase16 desktop approvals. Enable Demonstration Automation in Settings → Beta Features. See [Teach Mode](docs/automation/TEACH_MODE.md), [Replay](docs/automation/REPLAY.md) and [verification](docs/PHASE17_FINAL_REPORT.md).

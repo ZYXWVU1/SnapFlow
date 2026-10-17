@@ -11,6 +11,7 @@ class SkillsPage(ScrollPage):
     manage_requested = Signal()
     edit_requested = Signal(str)
     test_requested = Signal(str)
+    automation_requested = Signal()
 
     def __init__(self, storage=None, parent=None):
         super().__init__(parent)
@@ -20,6 +21,9 @@ class SkillsPage(ScrollPage):
         self.content.addWidget(PageHeader('Visual Skills',
             'Teach AI to recognize the screen content that matters to you.',
             self.manage_button))
+        automation = AppButton('Automation Skills · Teach a Desktop Task')
+        automation.clicked.connect(self.automation_requested)
+        self.content.addWidget(automation)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search skills')
         self.search.setAccessibleName('Search skills')

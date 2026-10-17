@@ -122,6 +122,10 @@ class AppPaths:
         return self.data_dir / "custom_skills.json"
 
     @property
+    def automation_skills_file(self):
+        return self.data_dir / 'automation_skills.json'
+
+    @property
     def workflows_file(self):
         return self.data_dir / "workflows.json"
 

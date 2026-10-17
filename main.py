@@ -20,6 +20,14 @@ def main() -> int:
     phase14_smoke = ('--phase14-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE14_SMOKE') == '1')
     phase15_smoke = ('--phase15-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE15_SMOKE') == '1')
     phase16_smoke = ('--phase16-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE16_SMOKE') == '1')
+    phase17_smoke = ('--phase17-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE17_SMOKE') == '1')
+    if phase17_smoke:
+        from src.automation.packaged_smoke import install_smoke_isolation
+        try:
+            install_smoke_isolation()
+        except (ValueError, OSError):
+            print('Phase 17 smoke requires its disposable profile.', file=sys.stderr)
+            return 1
     if phase16_smoke:
         from src.desktop_actions.packaged_smoke import install_smoke_isolation
         try:
@@ -110,7 +118,7 @@ def main() -> int:
             return 1
 
     app.aboutToQuit.connect(instance_guard.close)
-    smoke = '--smoke-test' in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke
+    smoke = '--smoke-test' in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke or phase17_smoke
     safe_mode = '--safe-mode' in sys.argv
     diagnostics_requested = False
     if not smoke:
@@ -159,7 +167,10 @@ def main() -> int:
     app.aboutToQuit.connect(controller.crash_reporter.uninstall)
     if diagnostics_requested:
         QTimer.singleShot(0, lambda: (controller.main_window.open_page('settings'), controller.main_window.show()))
-    if phase16_smoke:
+    if phase17_smoke:
+        from src.automation.packaged_smoke import run_packaged_automation_smoke
+        QTimer.singleShot(0, lambda: run_packaged_automation_smoke(app, controller))
+    elif phase16_smoke:
         from src.desktop_actions.packaged_smoke import run_packaged_action_smoke
         QTimer.singleShot(0, lambda: run_packaged_action_smoke(app, controller))
     elif phase15_smoke:

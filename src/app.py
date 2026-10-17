@@ -409,6 +409,8 @@ class ApplicationController(QObject):
         self.desktop_controller = DesktopController(self)
         from src.ui.agent.desktop_actions import DesktopActionsController
         self.desktop_actions_controller = DesktopActionsController(self)
+        from src.ui.automation.controller import AutomationController
+        self.automation_controller = AutomationController(self)
         self.context_permissions.desktop_validator = self.desktop_controller.service.validate_sources
         self.agent_controller = AgentController(self)
         self.result.agent_requested.connect(self.open_agent)
@@ -436,6 +438,10 @@ class ApplicationController(QObject):
         self.menu.addAction("Visual Workflows", self.open_workflows)
         self.menu.addAction('Desktop Context…', self.desktop_controller.show)
         self.menu.addAction('Desktop Actions…', self.desktop_actions_controller.show_settings)
+        self.menu.addAction('Automation Skills…', self.automation_controller.show)
+        self.automation_controller.teach_action = self.menu.addAction('Teach SnapFlow…', self.automation_controller.teach)
+        self.menu.addAction('Pause / Resume Teaching', self.automation_controller.pause_teaching)
+        self.menu.addAction('Stop Teaching and Discard', lambda: self.automation_controller.teach_dialog.reject() if self.automation_controller.teach_dialog else None)
         self.desktop_controller.session_action = self.menu.addAction('Start Desktop Assistance…', self.desktop_controller.request_start)
         self.menu.addAction('Stop Desktop Assistance', self.desktop_controller.stop)
         self.menu.addSeparator()
@@ -480,6 +486,8 @@ class ApplicationController(QObject):
         if key == 'history':
             page.ai_history = self.ai_execution_history
             page.refresh()
+        elif key == 'skills':
+            page.automation_requested.connect(self.automation_controller.show)
         elif key == 'evaluation':
             page.client = self.client
             page.usage_storage = self.usage_storage
@@ -2295,6 +2303,8 @@ class ApplicationController(QObject):
 
     def quit(self) -> None:
         self.quitting = True
+        if getattr(self, 'automation_controller', None):
+            self.automation_controller.stop()
         if getattr(self, 'desktop_controller', None):
             self.desktop_actions_controller.stop()
             self.desktop_controller.stop()

@@ -19,7 +19,16 @@ Return one JSON object only: goal_summary, assumptions, warnings,
 steps. Each step has step_id, title, description (why, uses, effects), step_type, capability_id,
 input_bindings, dependencies, optional and verification. Ordered dependencies must precede
 their consumers. References are ${step_id.field} or ${step.step_id.field}. Default maximum ten
-steps. Do not invent cost estimates or permission metadata. A plan is a proposal for user review.'''
+steps. Copy step_type exactly from the selected capability's capability_type; do not use
+generic types such as read, invoke or action. input_bindings is an object containing only
+the selected capability's input_schema fields. dependencies is an array of earlier step_id
+strings; optional is a boolean. verification must be null or an object, never a prose string.
+For ordinary read/compare/generate steps use null (the registered output schema is verified).
+Put human-readable verification suggestions in description. For example a context read is
+{"step_id":"read_current","title":"Read current analysis","description":"Read the selected current source.",
+"step_type":"read_context","capability_id":"context:current","input_bindings":{},
+"dependencies":[],"optional":false,"verification":null}.
+Do not invent cost estimates or permission metadata. A plan is a proposal for user review.'''
 
 
 class AgentPlanner:

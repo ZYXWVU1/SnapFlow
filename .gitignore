@@ -26,33 +26,9 @@ release/
 /.github/workflows/windows-build.yml
 /.github/workflows/phase13-release.yml
 /packaging/
-!/packaging/
-/packaging/*
-!/packaging/SnapFlow.spec
-!/packaging/requirements-build.txt
-!/packaging/README.md
-!/packaging/SnapFlow.iss
-!/packaging/build_installer.py
 /scripts/
-!/scripts/
-/scripts/*
-!/scripts/benchmark_phase9.py
-!/scripts/benchmark_phase11.py
-!/scripts/benchmark_phase13.py
-!/scripts/verify_phase11.py
-!/scripts/verify_build.py
-!/scripts/build_windows.py
-!/scripts/create_checksums.py
-!/scripts/phase13_ci.py
-!/scripts/release_check.py
-!/scripts/soak_phase13.py
-!/scripts/stress_phase13.py
-!/scripts/phase13_profile.py
-!/scripts/verify_phase13_installer.py
-!/scripts/benchmark_app.py
-!/scripts/audit_package.py
-!/scripts/benchmark_optimization.py
-!/scripts/verify_package.py
+/tests/
+/test/
 
 # Local documentation, planning notes, and screenshots.
 /docs/

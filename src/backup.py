@@ -32,6 +32,7 @@ _FIXED_MEMBERS = {
     "config/local_models.json": "settings",
     "config/beta_features.json": "settings",
     "skills/custom_skills.json": "skills",
+    "automation/automation_skills.json": "automation",
     "workflows/workflows.json": "workflows",
     "workflows/workflow_history.json": "workflows",
     "integrations/integrations.json": "integrations",
@@ -42,6 +43,7 @@ _FIXED_MEMBERS = {
 _CATEGORY_TARGETS = {
     "settings": ("config_file", "model_records_file", "beta_features_file"),
     "skills": ("custom_skills_file",),
+    "automation": ("automation_skills_file",),
     "workflows": ("workflows_file", "workflow_history_file"),
     "integrations": ("integrations_file", "mcp_connections_file"),
     "evaluation": ("learning_database",),
@@ -100,6 +102,7 @@ class BackupService:
             ("settings", "config/local_models.json", self.paths.model_records_file, "file"),
             ("settings", "config/beta_features.json", self.paths.beta_features_file, "file"),
             ("skills", "skills/custom_skills.json", self.paths.custom_skills_file, "file"),
+            ('automation', 'automation/automation_skills.json', self.paths.automation_skills_file, 'file'),
             ("workflows", "workflows/workflows.json", self.paths.workflows_file, "file"),
             ("workflows", "workflows/workflow_history.json", self.paths.workflow_history_file, "file"),
             ("integrations", "integrations/integrations.json", self.paths.integrations_file, "file"),
@@ -153,6 +156,7 @@ class BackupService:
             self.paths.config_file,
             self.paths.model_records_file,
             self.paths.custom_skills_file,
+            self.paths.automation_skills_file,
             self.paths.workflows_file,
             self.paths.workflow_history_file,
             self.paths.integrations_file,
@@ -392,6 +396,9 @@ class BackupService:
                             raise ValueError('Invalid archived MCP working directory.')
                         profile['working_directory'] = None
                 MCPStorage._validate(inert)
+            elif member == 'automation/automation_skills.json':
+                from src.automation.storage import AutomationSkillStore
+                AutomationSkillStore.validate_payload(data)
             elif member == "skills/custom_skills.json":
                 from src.skills.custom.models import CustomSkillDefinition
                 if (not isinstance(data, dict) or type(data.get("version")) is not int or
@@ -435,6 +442,8 @@ class BackupService:
             raise BackupError(f"Unable to inspect the backup: {exc}") from exc
 
     def _target_for_member(self, member):
+        if member == 'automation/automation_skills.json':
+            return self.paths.automation_skills_file
         if member == "config/config.json":
             return self.paths.config_file
         if member == "config/local_models.json":
