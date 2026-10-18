@@ -37,6 +37,8 @@ class AIRequest:
     metadata: dict = field(default_factory=dict, repr=False)
     cancelled: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
     before_inference: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    stream: object | None = field(default=None, repr=False, compare=False)
+    image_scope: object | None = field(default=None, repr=False, compare=False)
     deadline: float | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):

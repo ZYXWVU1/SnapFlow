@@ -71,7 +71,7 @@ class LLMClient:
         from src.ai.transport import ClientPool
         self._cloud_pool = ClientPool()
 
-    def scoped(self, cancelled):
+    def scoped(self, cancelled, *, image_scope=None):
         client = self
         class ScopedClient:
             @property
@@ -87,11 +87,14 @@ class LLMClient:
                     return value
                 def call(*args, **kwargs):
                     previous = getattr(client._request_scope, 'cancelled', None)
+                    previous_image_scope = getattr(client._request_scope, 'image_scope', None)
                     client._request_scope.cancelled = cancelled
+                    client._request_scope.image_scope = image_scope
                     try:
                         return value(*args, **kwargs)
                     finally:
                         client._request_scope.cancelled = previous
+                        client._request_scope.image_scope = previous_image_scope
                 return call
         return ScopedClient()
 
@@ -106,6 +109,25 @@ class LLMClient:
         self._cloud_pool.close()
         if self._local_runtime is not None:
             self._local_runtime.shutdown()
+
+    def _record_local_stream_failure(self, runtime, request, error):
+        if not runtime.local or request.stream is None or self.usage_callback is None:
+            return
+        from src.usage import UsageEvent
+        usage = request.stream.usage
+        input_tokens = getattr(usage, 'prompt_tokens', None)
+        output_tokens = getattr(usage, 'completion_tokens', None)
+        available = (type(input_tokens) is int and input_tokens >= 0 and
+                     type(output_tokens) is int and output_tokens >= 0)
+        try:
+            self.usage_callback(UsageEvent(runtime.endpoint, runtime.model_id,
+                request.metadata.get('operation', 'local_ai'),
+                input_tokens if available else 0, output_tokens if available else 0,
+                latency_ms=max(0, round((request.timeout_seconds - request.remaining_timeout) * 1000)),
+                succeeded=False, failure_category='timeout' if request.remaining_timeout <= 0 else 'request_error',
+                usage_available=available, local=True))
+        except Exception:
+            logging.getLogger(__name__).warning('Unable to record local AI usage.')
 
     def _timeout_seconds(self, endpoint=None):
         # Keep the established longer local budget unless explicitly configured.
@@ -136,6 +158,15 @@ class LLMClient:
         cloud_endpoint = cloud_endpoint or self.config.ai_base_url or os.getenv('AI_BASE_URL') or DEFAULT_AI_BASE_URL
         runtimes = [CloudRuntime(cloud_model, cloud_executor, cloud_endpoint, self.policy)]
         config = self.config
+        if request.stream is not None:
+            def stream_guard():
+                if self.config is not config:
+                    raise AnalysisError('AI settings changed during this request. Retry using the current policy.')
+                if request.cancelled and request.cancelled():
+                    raise AnalysisError('AI request cancelled.')
+                if request.remaining_timeout <= 0:
+                    raise AnalysisError('AI request timed out.')
+            request.stream.guard = stream_guard
         from src.ai.routing_context import collect_resources, RoutingContextResolver
         needs_local = bool(config.local_ai_model) and (config.ai_execution_mode != 'cloud_only'
             or config.private_mode or self.policy.private_mode
@@ -150,7 +181,8 @@ class LLMClient:
             data.update(evidence)
         data.pop('definition_snapshot', None)
         request = replace(request, metadata=data,
-            before_inference=getattr(self._request_scope, 'before_inference', None))
+            before_inference=getattr(self._request_scope, 'before_inference', None),
+            image_scope=getattr(self._request_scope, 'image_scope', None))
         if needs_local:
             if self._local_runtime is None:
                 caps = ModelCapabilities(text=True, vision=config.local_ai_vision,
@@ -172,7 +204,7 @@ class LLMClient:
             request = replace(request, metadata={**request.metadata, 'runtime_choice': choice})
         router = AIRuntimeRouter(runtimes, config, self.policy,
             performance_store=self.performance_store, fallback_callback=self.fallback_callback,
-            config_provider=lambda: self.config)
+            config_provider=lambda: self.config, failure_callback=self._record_local_stream_failure)
         try:
             response = router.execute(request, validator)
             if self.config is not config:
@@ -201,6 +233,7 @@ class LLMClient:
         return self.request_image(image_bytes, prompt, mode=mode, validator=validator, **kwargs)
 
     def _cloud_http(self, transport=None, cancelled=None):
+        from src.ai.deadline_transport import DeadlineTransport
         def guard(request):
             deadline = getattr(self._request_scope, 'transport_deadline', None)
             if deadline is not None and time.monotonic() >= deadline:
@@ -211,7 +244,12 @@ class LLMClient:
             if self.config.private_mode or self.config.ai_execution_mode == 'local_only':
                 raise AnalysisError('The current policy blocks cloud AI.')
             self.policy.require_allowed(str(request.url), 'cloud_ai')
-        return httpx.Client(transport=transport, follow_redirects=False,
+        if transport is None:
+            transport = DeadlineTransport(scope=lambda: (
+                getattr(self._request_scope, 'transport_deadline', None),
+                getattr(self._request_scope, 'transport_cancelled', None) or cancelled),
+                trust_env=True, max_connections=4)
+        return httpx.Client(transport=transport, trust_env=False, follow_redirects=False,
                             limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
                             event_hooks={'request': [guard]})
 
@@ -267,13 +305,15 @@ class LLMClient:
     def request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
                       custom_prompt=None, history=None, model_override=None, usage_operation=None,
                       *, response_schema=None, validator=None, privacy_requirement='standard',
-                      runtime_choice=None, metadata=None, cancelled=None) -> str:
+                      runtime_choice=None, metadata=None, cancelled=None, on_delta=None) -> str:
         from src.ai.models import AIRequest
         from src.observability.performance import emit
         prepared = time.perf_counter()
         if not image_bytes:
             raise AnalysisError('The screenshot is empty. Please capture again.')
-        request = AIRequest(prompt=prompt, task_type='structured_extraction' if mode in ('skill', 'extract', 'debug') else 'vision',
+        from src.ai.streaming import StreamingOutput
+        stream = StreamingOutput(on_delta) if on_delta is not None and mode in ('ask', 'explain', 'translate') and response_schema is None and validator is None else None
+        request = AIRequest(prompt=prompt, stream=stream, task_type='structured_extraction' if mode in ('skill', 'extract', 'debug') else 'vision',
             timeout_seconds=self._timeout_seconds(),
             cancelled=cancelled or getattr(self._request_scope, 'cancelled', None),
             image_bytes=image_bytes, conversation=history or (), response_schema=response_schema,
@@ -288,7 +328,7 @@ class LLMClient:
             base_url=req.metadata['cloud_base_url'],
             timeout_seconds=req.remaining_timeout,
             deadline=req.deadline,
-            image_encoding=req.metadata.get('image_encoding', 'png')), cloud_model=model_override, validator=validator)
+            image_encoding=req.metadata.get('image_encoding', 'png'), stream=req.stream), cloud_model=model_override, validator=validator)
 
     def _record_usage(self, response, *, model, base_url, operation, started=None, failure=None):
         if self.usage_callback is None:
@@ -388,18 +428,18 @@ class LLMClient:
         return True
 
     def analyze_image(self, image_bytes: bytes, mode: str = "ask", custom_prompt: str | None = None,
-                      history: list[dict[str, str]] | None = None) -> str:
+                      history: list[dict[str, str]] | None = None, *, on_delta=None) -> str:
         prompt = get_prompt(mode)
         from src.modes import parse_result
         validator = (lambda text: parse_result(mode, text)) if mode in ('debug', 'extract') else None
-        return self.request_image(image_bytes, prompt, mode, custom_prompt, history, validator=validator)
+        return self.request_image(image_bytes, prompt, mode, custom_prompt, history, validator=validator, on_delta=on_delta)
 
     def _cloud_request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
                       custom_prompt: str | None = None,
                       history: list[dict[str, str]] | None = None,
                       model_override: str | None = None,
                       usage_operation: str | None = None, *, cancelled=None, image_encoding='png', base_url=None,
-                      timeout_seconds=None, deadline=None) -> str:
+                      timeout_seconds=None, deadline=None, stream=None) -> str:
         """Shared vision transport for workflow and standalone classification prompts."""
         from openai import APIConnectionError, APIStatusError, APITimeoutError
         key = os.getenv("AI_API_KEY", "").strip()
@@ -431,6 +471,12 @@ class LLMClient:
             messages.extend(dict(message) for message in history[-12:])
             messages.append({'role': 'user', 'content': (custom_prompt or '').strip() or 'Explain this screenshot.'})
         started = time.perf_counter()
+        response = None
+        def usage_response():
+            if response is not None:
+                return response
+            from types import SimpleNamespace
+            return SimpleNamespace(usage=getattr(stream, 'usage', None))
         try:
             with self._cloud_client(key, base_url,
                     _request_timeout(base_url) if timeout_seconds is None else timeout_seconds, cancelled, deadline) as client:
@@ -445,9 +491,9 @@ class LLMClient:
                     # when it is false. Only send it when explicitly enabled.
                     if thinking == "true":
                         request["extra_body"] = {"enable_thinking": True}
-                response = client.chat.completions.create(**request)
-            self._record_usage(response, model=model, base_url=base_url,
-                               operation=usage_operation or mode or 'image', started=started)
+                from src.ai.streaming import complete
+                response = complete(client, request, stream, cancelled=cancelled, deadline=deadline,
+                    guard=lambda: self.policy.require_allowed(base_url, 'cloud_ai'))
             if not response.choices:
                 raise AnalysisError("The AI service returned no answer. Please try again.")
             if mode in ('extract', 'debug', 'ocr', 'skill') and getattr(response.choices[0], 'finish_reason', None) == 'length':
@@ -459,20 +505,22 @@ class LLMClient:
             text = message.content or getattr(message, "refusal", None)
             if not isinstance(text, str) or not text.strip():
                 raise AnalysisError("The AI service returned an empty answer. Please try again.")
+            self._record_usage(response, model=model, base_url=base_url,
+                               operation=usage_operation or mode or 'image', started=started)
             return text.strip()
         except APITimeoutError as exc:
-            self._record_usage(None, model=model, base_url=base_url,
+            self._record_usage(usage_response(), model=model, base_url=base_url,
                                operation=usage_operation or mode or 'image', started=started, failure=exc)
             raise AnalysisError(
                 f"The AI request timed out after {_request_timeout(base_url):g} seconds. "
                 "Try a faster model or increase AI_TIMEOUT in .env."
             ) from None
         except APIConnectionError as exc:
-            self._record_usage(None, model=model, base_url=base_url,
+            self._record_usage(usage_response(), model=model, base_url=base_url,
                                operation=usage_operation or mode or 'image', started=started, failure=exc)
             raise AnalysisError("Unable to contact the AI service. Check your internet connection and try again.") from None
         except APIStatusError as exc:
-            self._record_usage(None, model=model, base_url=base_url,
+            self._record_usage(usage_response(), model=model, base_url=base_url,
                                operation=usage_operation or mode or 'image', started=started, failure=exc)
             messages = {
                 400: "The AI service rejected the request (HTTP 400). Check that AI_MODEL is a vision model and that the image format is supported.",
@@ -486,10 +534,12 @@ class LLMClient:
             if detail:
                 message += f" Details: {detail}"
             raise AnalysisError(message) from None
-        except AnalysisError:
+        except AnalysisError as exc:
+            self._record_usage(usage_response(), model=model, base_url=base_url,
+                               operation=usage_operation or mode or 'image', started=started, failure=exc)
             raise
         except Exception:
-            self._record_usage(None, model=model, base_url=base_url,
+            self._record_usage(usage_response(), model=model, base_url=base_url,
                                operation=usage_operation or mode or 'image', started=started,
                                failure=RuntimeError())
             raise AnalysisError("Unable to process the AI response. Check the configured model and endpoint.") from None

@@ -32,7 +32,8 @@ from src.hotkeys import Hotkeys
 from src.llm_client import AnalysisError, LLMClient
 from src.modes import ModeResult, ResponseFormatError, parse_result
 from src.prompts import MODES
-from src.screenshot import capture_screen, image_to_png_bytes
+from src.screenshot import capture_screen
+from src.capture_worker import CaptureWorker
 from src.ui.result_window import ResultWindow
 from src.ui.memory_dialogs import MemorySaveDialog, MemoryDetailDialog
 from src.ui.context_assistant import ContextAssistantDialog
@@ -92,18 +93,22 @@ class AnalysisWorker(QRunnable):
         self.signals = WorkerSignals()
         self.request_id, self.client, self.data = request_id, client, data
         self.mode, self.question = mode, question
+        self.configuration = client.config
+        self.private_at_start = client.policy.private_mode
         self.history = list(history or [])
         self.queued_at = time.perf_counter()
+        from src.ai.streaming import DeltaBuffer
+        self.deltas = DeltaBuffer()
 
     def run(self) -> None:
         from src.observability.performance import emit
         emit('operation_completed', component='ai_router', success=True,
             duration_ms=(time.perf_counter() - self.queued_at) * 1000, properties={'operation': 'queue_wait'})
         try:
+            options = {'on_delta': self.deltas.append} if self.mode in ('ask', 'explain', 'translate') else {}
             if self.history:
-                text = self.client.analyze_image(self.data, self.mode, self.question, history=self.history)
-            else:
-                text = self.client.analyze_image(self.data, self.mode, self.question)
+                options['history'] = self.history
+            text = self.client.analyze_image(self.data, self.mode, self.question, **options)
             text = parse_result(self.mode, text)
             error = False
         except (AnalysisError, ResponseFormatError) as exc:
@@ -317,8 +322,18 @@ class ApplicationController(QObject):
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.workers: dict[int, AnalysisWorker | ClassificationWorker | SkillExtractionWorker] = {}
+        self.stream_timer = QTimer(self)
+        self.stream_timer.setInterval(40)
+        self.stream_timer.timeout.connect(self.flush_stream)
         self.request_id = 0
         self.image_bytes = b""
+        from src.ai.images import PreparedImageScope
+        self.capture_image_scope = PreparedImageScope()
+        self.capture_generation = 0
+        self.capture_workers = {}
+        self._capture_active_generation = None
+        self.capture_pool = QThreadPool(self)
+        self.capture_pool.setMaxThreadCount(1)
         self.capture_created_at = None
         self.ask_history: list[dict[str, str]] = []
         self.last_result: ModeResult | SkillResult | None = None
@@ -1305,6 +1320,7 @@ class ApplicationController(QObject):
     def capture(self) -> None:
         if self.capturing or self.workers or self.quitting:
             return
+        self.invalidate_capture_preparation()
         self.capturing = True
         self._restore_home_after_capture = self.main_window.isVisible()
         self.main_window.hide()
@@ -1362,6 +1378,8 @@ class ApplicationController(QObject):
 
     @measured('capture_prepare', 'capture', event_type='capture_completed')
     def selected(self, image: QImage) -> None:
+        if self.quitting:
+            return False
         self._capture_result_started = time.perf_counter()
         if getattr(self, 'context_dialog', None) is not None:
             self.context_dialog.close()
@@ -1375,25 +1393,63 @@ class ApplicationController(QObject):
         self.result.followup.clear()
         self.retry_skill = None
         self.capture_created_at = datetime.now(timezone.utc).isoformat()
-        try:
-            self.image_bytes = image_to_png_bytes(image)
-        except ValueError as exc:
+        self.invalidate_capture_preparation()
+        self.image_bytes = b""
+        generation = self.capture_generation
+        worker = CaptureWorker(generation, image)
+        self.capture_workers[generation] = worker
+        worker.signals.finished.connect(self.capture_prepared)
+        if not self._onboarding_capture_test:
+            self.result.set_busy('Preparing screenshot...')
+            self.result.show()
+            self.result.raise_()
+            if self.preview:
+                self.result.show_preview(image)
+        if self._capture_active_generation is None:
+            self._capture_active_generation = generation
+            self.capture_pool.start(worker)
+        return True
+
+    def invalidate_capture_preparation(self):
+        from src.ai.images import PreparedImageScope
+        self.capture_image_scope.close()
+        self.capture_image_scope = PreparedImageScope()
+        self.capture_generation += 1
+        for generation, worker in list(self.capture_workers.items()):
+            # cancel() only touches Python-owned state. The submitted runnable's
+            # C++ lifetime belongs to Qt and may have ended before its GUI signal.
+            worker.cancel()
+            if generation != self._capture_active_generation:
+                self.capture_workers.pop(generation, None)
+
+    @Slot(int, object, str)
+    def capture_prepared(self, generation, payload, error):
+        self.capture_workers.pop(generation, None)
+        self._capture_active_generation = None
+        # Only one runnable is ever submitted; retain at most the latest pending
+        # snapshot outside Qt's queue, so replacement needs no tryTake()/C++ calls.
+        pending = self.capture_workers.get(self.capture_generation)
+        if pending is not None and not self.quitting:
+            self._capture_active_generation = self.capture_generation
+            self.capture_pool.start(pending)
+        if self.quitting:
+            QTimer.singleShot(0, self.finish_quit)
+            return
+        if generation != self.capture_generation:
+            return
+        if error:
             if self._onboarding_capture_test:
-                self.finish_onboarding_capture_test(False, str(exc))
+                self.finish_onboarding_capture_test(False, error)
             else:
-                self.report_error(exc, context='screenshot_capture')
-            return False
+                self.report_error(ValueError(error), context='screenshot_capture')
+            return
         if self._onboarding_capture_test:
             self.finish_onboarding_capture_test(
                 True, 'Capture test succeeded. The selected screenshot was discarded and not sent to an AI service.')
-            return True
-        self.result.show()
-        self.result.raise_()
-        if self.preview:
-            self.result.show_preview(image)
-        else:
+            return
+        self.image_bytes = payload
+        if not self.preview:
             self.analyze()
-        return True
 
     def analyze(self, question: str = "") -> None:
         if not self.image_bytes or self.workers or self.preview or self.quitting:
@@ -1412,7 +1468,8 @@ class ApplicationController(QObject):
 
     def request_client(self):
         request_id = self.request_id
-        return self.client.scoped(lambda: self.quitting or self.request_id != request_id)
+        return self.client.scoped(lambda: self.quitting or self.request_id != request_id,
+                                  image_scope=self.capture_image_scope)
 
     def start_analysis(self, mode: str, question: str = '') -> None:
         if self.context_dialog is not None:
@@ -1425,7 +1482,23 @@ class ApplicationController(QObject):
         self.result.set_busy(loading_message(mode) if self.mode == 'smart' else 'Analyzing screenshot...')
         self.capture_action.setEnabled(False)
         self.mode_group.setEnabled(False)
+        if mode in ('ask', 'explain', 'translate'):
+            self.stream_timer.start()
         self.pool.start(worker)
+
+    def flush_stream(self):
+        worker = self.workers.get(self.request_id)
+        if self.quitting or not isinstance(worker, AnalysisWorker):
+            self.stream_timer.stop()
+            return
+        if (worker.configuration is not self.client.config or
+                worker.private_at_start != self.client.policy.private_mode):
+            worker.deltas.close()
+            self.stream_timer.stop()
+            return
+        text = worker.deltas.take()
+        if text:
+            self.result.append_partial(text)
 
     def run_smart_pipeline(self) -> None:
         if self.context_dialog is not None:
@@ -1513,11 +1586,18 @@ class ApplicationController(QObject):
                 (time.perf_counter() - self._capture_result_started) * 1000, not error)
             self._capture_result_started = None
         worker = self.workers.pop(request_id, None)
+        if isinstance(worker, AnalysisWorker):
+            worker.deltas.close()
+        if request_id == self.request_id:
+            self.stream_timer.stop()
         self.capture_action.setEnabled(not self.quitting and not self.workers)
         self.mode_group.setEnabled(not self.workers)
         if self.quitting:
             QTimer.singleShot(0, self.finish_quit)
         elif worker is not None and request_id == self.request_id:
+            if isinstance(worker, AnalysisWorker) and (worker.configuration is not self.client.config or
+                    worker.private_at_start != self.client.policy.private_mode):
+                text, error = 'AI settings changed during this request. Retry using the current policy.', True
             if error:
                 self.failed_question = worker.question
                 self.last_result = None
@@ -1715,6 +1795,11 @@ class ApplicationController(QObject):
         self.analyze(question or 'Explain the extracted information in this screenshot.')
 
     def discard_result(self) -> None:
+        self.stream_timer.stop()
+        for worker in self.workers.values():
+            if isinstance(worker, AnalysisWorker):
+                worker.deltas.close()
+        self.invalidate_capture_preparation()
         if self.context_dialog is not None:
             self.context_dialog.close()
         self.retry_skill = None
@@ -2303,6 +2388,11 @@ class ApplicationController(QObject):
 
     def quit(self) -> None:
         self.quitting = True
+        self.stream_timer.stop()
+        for worker in self.workers.values():
+            if isinstance(worker, AnalysisWorker):
+                worker.deltas.close()
+        self.invalidate_capture_preparation()
         if getattr(self, 'automation_controller', None):
             self.automation_controller.stop()
         if getattr(self, 'desktop_controller', None):
@@ -2353,7 +2443,8 @@ class ApplicationController(QObject):
         if self.mcp_shutdown_future is not None and not self.mcp_shutdown_future.done():
             QTimer.singleShot(50, self.finish_quit)
             return
-        if (QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or self.server_service.active_workflows or
+        if (self.capture_pool.activeThreadCount() or self.capture_workers or
+                QThreadPool.globalInstance().activeThreadCount() or self.workflow_jobs or self.server_service.active_workflows or
                 self.integration_jobs or self.calendar_event_worker is not None or
                 self.memory_recall_worker is not None or
                 self.semantic_rebuild_worker is not None or

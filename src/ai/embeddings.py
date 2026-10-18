@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import heapq
+import time
 
 from src.memory.models import MemorySearchResult
 from src.network_policy import get_network_policy
@@ -45,6 +46,9 @@ class LocalEmbeddingProvider:
     def embed(self, texts):
         return self.runtime.embed(texts)
 
+    def embed_with_budget(self, texts, *, cancelled, deadline):
+        return self.runtime.embed(texts, cancelled=cancelled, deadline=deadline)
+
 
 class SemanticMemoryIndex:
     def __init__(self, store, provider, policy=None):
@@ -62,22 +66,35 @@ class SemanticMemoryIndex:
             raise ValueError('Semantic search cancelled.')
 
     @measured('embedding', 'local_runtime')
-    def _embed(self, texts, cancelled=None):
+    def _embed(self, texts, cancelled=None, *, background=False):
+        deadline = time.monotonic() + 120
         def operation():
             self._check_cancelled(cancelled)
             self._allowed()
+            budgeted = getattr(self.provider, 'embed_with_budget', None)
+            if budgeted is not None:
+                return budgeted(texts, cancelled=cancelled, deadline=deadline)
             return self.provider.embed(texts)
-        vectors = run_cancellable(operation, cancelled=cancelled or (lambda: False), timeout=120)
+        vectors = run_cancellable(operation, cancelled=cancelled or (lambda: False),
+                                  timeout=max(0, deadline - time.monotonic()), background=background)
         self._check_cancelled(cancelled)
         return vectors
 
     def _normalize(self, vector):
-        if not isinstance(vector, (list, tuple)) or len(vector) != self.manifest.dimension or any(type(x) not in (int, float) or not math.isfinite(x) for x in vector):
+        if not isinstance(vector, (list, tuple)) or len(vector) != self.manifest.dimension:
             raise ValueError('Embedding dimension or values do not match the configured index.')
-        norm = math.hypot(*(float(x) for x in vector))
-        if not math.isfinite(norm) or norm == 0:
+        # Stored JSON numbers are exact int/float values. Keep strict validation,
+        # but avoid a Python generator and two redundant float conversions per
+        # element on every search candidate. hypot and division already convert.
+        finite = math.isfinite
+        for value in vector:
+            kind = type(value)
+            if (kind is not float and kind is not int) or not finite(value):
+                raise ValueError('Embedding dimension or values do not match the configured index.')
+        norm = math.hypot(*vector)
+        if not finite(norm) or norm == 0:
             raise ValueError('Embedding vector has no valid direction.')
-        return [float(x) / norm for x in vector]
+        return [value / norm for value in vector]
 
     def status(self):
         with self.store._connect() as db:
@@ -108,7 +125,7 @@ class SemanticMemoryIndex:
             self._allowed()
             try:
                 vectors = self._embed(['\n'.join((row['title'], row['description'], row['searchable_text']))[:200000]
-                                      for row in rows], cancelled)
+                                      for row in rows], cancelled, background=True)
             except ValueError:
                 if cancelled and cancelled():
                     return dict(self.status(), indexed=indexed, cancelled=True)

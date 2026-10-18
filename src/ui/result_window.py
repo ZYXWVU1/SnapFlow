@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt, Signal
 from datetime import date
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtGui import QCloseEvent, QImage, QPixmap, QTextCursor
 from PySide6.QtWidgets import QApplication, QComboBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
 
 from src.app_version import APP_NAME
@@ -337,6 +337,8 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.preview.hide()
 
     def set_busy(self, message: str = 'Analyzing screenshot...') -> None:
+        self._partial_started = False
+        self.agent_button.setEnabled(False)
         self.clear_actions()
         self.structured.hide()
         self.followup_row.hide()
@@ -349,7 +351,16 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.again.setEnabled(False)
         self.mode.setEnabled(False)
 
+    def append_partial(self, text):
+        if not getattr(self, '_partial_started', False):
+            self.text.setPlainText('Answer in progress…\n\n')
+            self._partial_started = True
+        self.text.moveCursor(QTextCursor.MoveOperation.End)
+        self.text.insertPlainText(text)
+
     def set_response(self, text: str, error: bool = False) -> None:
+        self._partial_started = False
+        self.agent_button.setEnabled(not error)
         if error:
             self.again.setText('Retry')
         self.clear_actions()

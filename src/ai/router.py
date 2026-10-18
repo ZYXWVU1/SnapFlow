@@ -4,11 +4,12 @@ from src.observability.performance import trace, measured, emit
 
 
 class AIRuntimeRouter:
-    def __init__(self, runtimes, config, policy, *, performance_store=None, fallback_callback=None, config_provider=None):
+    def __init__(self, runtimes, config, policy, *, performance_store=None, fallback_callback=None, config_provider=None, failure_callback=None):
         self.runtimes, self.config, self.policy = tuple(runtimes), config, policy
         self.last_decision = None
         self.performance_store = performance_store
         self.fallback_callback = fallback_callback
+        self.failure_callback = failure_callback
         self.config_provider = config_provider or (lambda: self.config)
 
     def _compatible(self, runtime, request):
@@ -97,6 +98,8 @@ class AIRuntimeRouter:
         last_error = None
         for runtime in candidates:
             self._check_cancel(request)
+            if request.stream is not None:
+                request.stream.usage = None
             # Re-evaluate privacy before every attempt and after failed validation.
             now_private = self.policy.private_mode or self.config.private_mode or request.privacy_requirement == 'private'
             if not runtime.local:
@@ -126,7 +129,8 @@ class AIRuntimeRouter:
                 with trace('ai_health', 'ai_router'):
                     health = getattr(runtime, 'health_check_request', None)
                     if not run_cancellable(lambda health=health, runtime=runtime: health(request) if health else runtime.health_check(),
-                            request.cancelled, min(request.remaining_timeout, 10)):
+                            request.cancelled, min(request.remaining_timeout, 10),
+                            background=request.metadata.get('operation') == 'evaluation'):
                         raise ValueError('The selected runtime is offline or its model is not loaded.')
                 self._check_cancel(request)
                 if not runtime.local:
@@ -148,7 +152,12 @@ class AIRuntimeRouter:
             except Exception as exc:
                 emit('ai_request_completed', component='ai_router', success=False,
                      properties={'runtime': 'local' if runtime.local else 'cloud', 'fallback': failed_local})
-                if not runtime.local or not allowed:
+                if self.failure_callback:
+                    try:
+                        self.failure_callback(runtime, request, exc)
+                    except Exception:
+                        pass  # Accounting must not hide the original provider failure.
+                if (request.stream is not None and request.stream.started) or not runtime.local or not allowed:
                     raise
                 failed_local = True
                 last_error = exc

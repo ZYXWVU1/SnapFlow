@@ -43,6 +43,7 @@ class LocalOpenAICompatibleRuntime:
                 self._slots[self.endpoint] = self._slot
 
     def _http(self):
+        from src.ai.deadline_transport import DeadlineTransport
         def guard(request):
             with self._health_lock:
                 if self._closed:
@@ -54,7 +55,11 @@ class LocalOpenAICompatibleRuntime:
             if cancelled and cancelled():
                 raise ValueError('AI request cancelled.')
             self.policy.require_allowed(str(request.url), 'local_ai' if self.local else 'cloud_ai')
-        return httpx.Client(trust_env=False, follow_redirects=False,
+        transport = DeadlineTransport(scope=lambda: (
+            getattr(self._request_scope, 'deadline', None),
+            getattr(self._request_scope, 'cancelled', None)),
+            trust_env=False, max_connections=2)
+        return httpx.Client(transport=transport, trust_env=False, follow_redirects=False,
                             limits=httpx.Limits(max_connections=2, max_keepalive_connections=2),
                             event_hooks={'request': [guard]}, timeout=10)
 
@@ -126,7 +131,8 @@ class LocalOpenAICompatibleRuntime:
 
     def _generate(self, request):
         from .cancellation import run_cancellable
-        return run_cancellable(lambda: self._generate_blocking(request), request.cancelled, request.remaining_timeout)
+        return run_cancellable(lambda: self._generate_blocking(request), request.cancelled, request.remaining_timeout,
+                               background=request.metadata.get('operation') == 'evaluation')
 
     def _generate_blocking(self, request):
         if not self.local and request.privacy_requirement in ('local_only', 'private'):
@@ -137,8 +143,14 @@ class LocalOpenAICompatibleRuntime:
             schema_validator(request.response_schema)
         if request.cancelled and request.cancelled():
             raise ValueError('AI request cancelled.')
-        if not self._slot.acquire(blocking=False):
-            raise ValueError('Local AI is busy. Wait for the current request to finish.')
+        # A dispatched background inference cannot be preempted. Let an
+        # interactive request wait for that slot under its original deadline;
+        # admission keeps subsequent background batches behind this request.
+        while not self._slot.acquire(timeout=min(.02, request.remaining_timeout)):
+            if request.cancelled and request.cancelled():
+                raise ValueError('AI request cancelled.')
+            if request.remaining_timeout <= 0:
+                raise ValueError('AI request timed out.')
         started = time.perf_counter()
         metadata = None
         managed_active = False
@@ -155,7 +167,8 @@ class LocalOpenAICompatibleRuntime:
             if request.image_bytes:
                 if not self.capabilities.vision:
                     raise ValueError('The local model has no verified Vision support. Open AI & Models.')
-                image_bytes, metadata = prepare_image(request.image_bytes)
+                prepare = request.image_scope.prepare if request.image_scope is not None else prepare_image
+                image_bytes, metadata = prepare(request.image_bytes)
                 if question and not request.conversation:
                     prompt += '\n\nAdditional question about this image:\n' + question.strip()
                 content = [{'type': 'image_url', 'image_url': {'url':
@@ -173,7 +186,10 @@ class LocalOpenAICompatibleRuntime:
                 payload['response_format'] = {'type': 'json_schema', 'json_schema': {
                     'name': 'snapflow_result', 'schema': request.response_schema}}
             with self._sdk(request.remaining_timeout, deadline=request.deadline, cancelled=request.cancelled) as client:
-                response = client.chat.completions.create(**payload)
+                from .streaming import complete
+                response = complete(client, payload, request.stream, cancelled=request.cancelled,
+                    deadline=request.deadline, guard=lambda: self.policy.require_allowed(
+                        self.endpoint, 'local_ai' if self.local else 'cloud_ai'))
             if request.cancelled and request.cancelled():
                 raise ValueError('AI request cancelled.')
             if not response.choices or not isinstance(response.choices[0].message.content, str) or not response.choices[0].message.content.strip():
@@ -206,20 +222,31 @@ class LocalOpenAICompatibleRuntime:
     def analyze_image(self, request):
         return self._generate(request)
 
-    def embed(self, texts):
+    def embed(self, texts, *, cancelled=None, deadline=None):
         if not self.capabilities.embeddings:
             raise ValueError('Embeddings are unsupported by this model.')
         if not isinstance(texts, list) or not 1 <= len(texts) <= 32 or any(not isinstance(text, str) or len(text) > 200000 for text in texts):
             raise ValueError('Invalid embedding batch.')
-        if not self._slot.acquire(blocking=False):
-            raise ValueError('Local AI is busy.')
+        deadline = time.monotonic() + 120 if deadline is None else deadline
+        if type(deadline) not in (int, float) or not math.isfinite(deadline):
+            raise ValueError('Invalid embedding request deadline.')
+        def check_budget():
+            if cancelled and cancelled():
+                raise ValueError('AI request cancelled.')
+            if time.monotonic() >= deadline:
+                raise ValueError('AI request timed out.')
+        check_budget()
+        while not self._slot.acquire(timeout=min(.02, max(0, deadline - time.monotonic()))):
+            check_budget()
         managed_active = False
         try:
             if self.manager:
                 self.manager.mark_request_started()
                 managed_active = True
-            with self._sdk(120) as client:
+            check_budget()
+            with self._sdk(min(120, deadline - time.monotonic()), deadline=deadline, cancelled=cancelled) as client:
                 result = client.embeddings.create(model=self.model_id, input=texts)
+            check_budget()
             if sorted(item.index for item in result.data) != list(range(len(texts))):
                 raise ValueError('The runtime returned missing or duplicate embedding indices.')
             vectors = [item.embedding for item in sorted(result.data, key=lambda item: item.index)]
@@ -229,6 +256,7 @@ class LocalOpenAICompatibleRuntime:
         except ValueError:
             raise
         except Exception:
+            check_budget()
             with self._health_lock:
                 self._healthy_until = 0.0
             raise ValueError('Local embedding generation is unavailable. Keyword search remains available.') from None
