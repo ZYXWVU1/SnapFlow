@@ -59,11 +59,13 @@ class AutomationController(QObject):
     def _teaching_changed(self, active):
         if self.teach_action:
             self.teach_action.setText('Teaching Active · Show Controls…' if active else 'Teach SnapFlow…')
-        self.owner.tray.setToolTip('SnapFlow · Teaching Active' if active else 'SnapFlow')
+        if hasattr(self.owner, 'refresh_ui_state'):
+            self.owner.refresh_ui_state()
 
     def pause_teaching(self):
         if self.teach_dialog:
             self.teach_dialog.pause()
+            self._teaching_changed(True)
 
     def _new_draft(self, skill):
         try:

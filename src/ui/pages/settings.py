@@ -1,6 +1,6 @@
 """Readable preferences summary and user data backup controls."""
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel
+from PySide6.QtWidgets import QBoxLayout, QComboBox, QLabel
 
 from src.ui.design.components import AppButton, PageHeader
 from src.ui.design.components import Card
@@ -35,7 +35,12 @@ class SettingsPage(ScrollPage):
         self.edit_button = AppButton('Edit Settings', variant='primary')
         self.edit_button.clicked.connect(self.edit_requested)
         self.content.addWidget(PageHeader('Settings',
-            'Control capture, AI, and appearance preferences.', self.edit_button))
+            'Make SnapFlow work the way you do.', self.edit_button))
+        self.category_selector = QComboBox()
+        self.category_selector.setAccessibleName('Settings category')
+        self.category_selector.addItems(['General', 'AI & Models', 'Privacy & Permissions',
+            'Data & Storage', 'Help & Diagnostics', 'Usage', 'About & Updates'])
+        self.content.addWidget(self.category_selector)
         capture = Card()
         capture.content.addWidget(QLabel('Capture'))
         capture.content.addWidget(QLabel('Hotkey'))
@@ -191,7 +196,7 @@ class SettingsPage(ScrollPage):
         data.content.addWidget(self.data_location_label)
         self.storage_usage_label = QLabel('Not calculated')
         data.content.addWidget(self.storage_usage_label)
-        buttons = QHBoxLayout()
+        buttons = QBoxLayout(QBoxLayout.Direction.TopToBottom)
         self.backup_export_button = AppButton('Export Backup', variant='primary')
         self.backup_restore_button = AppButton('Restore Backup')
         self.open_data_folder_button = AppButton('Open Data Folder')
@@ -222,7 +227,24 @@ class SettingsPage(ScrollPage):
         about.content.addWidget(self.reopen_onboarding_button)
         self.content.addWidget(about)
         self.content.addStretch(1)
+        self._category_cards = {
+            'General': (capture, appearance),
+            'AI & Models': (ai,),
+            'Privacy & Permissions': (privacy, context, desktop),
+            'Data & Storage': (data, memory),
+            'Help & Diagnostics': (diagnostics,),
+            'Usage': (usage,),
+            'About & Updates': (about,),
+        }
+        self.category_selector.currentTextChanged.connect(self._show_category)
+        self._show_category(self.category_selector.currentText())
         self.refresh(config)
+
+    def _show_category(self, category):
+        for name, cards in self._category_cards.items():
+            for card in cards:
+                card.setVisible(name == category)
+        self.verticalScrollBar().setValue(0)
 
     def refresh(self, config):
         if config is None:

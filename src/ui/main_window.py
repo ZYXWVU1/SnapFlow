@@ -1,17 +1,21 @@
 """Navigable desktop shell around the existing capture and feature workflows."""
 from collections.abc import Mapping
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMainWindow, QScrollArea,
-    QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QShortcut, QKeySequence
+from PySide6.QtWidgets import (QBoxLayout, QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QScrollArea,
+    QSizePolicy, QStackedWidget, QTabBar, QToolButton, QVBoxLayout, QWidget)
 
 from src.app_version import APP_NAME
-from src.ui.design.components import AppButton, Badge, Card, PageHeader, ToastManager
+from src.ui.design.components import ActionRow, AppButton, Card, PageHeader, ToastManager
 from src.ui.design.icons import icon
 from src.ui.design.tokens import SPACING
+from src.prompts import MODES
+from src.ui.navigation_drawer import NavigationScrim
+from src.ui.navigation import NAVIGATION, AUTOMATION_TABS, CONNECTION_TABS, AUTOMATION_ROUTES, parent_route
 
 
-PAGES = ('home', 'agent', 'memory', 'skills', 'workflows', 'integrations', 'extensions', 'evaluation', 'history', 'settings')
+PAGES = ('home', 'agent', 'memory', 'skills', 'workflows', 'integrations', 'extensions', 'evaluation', 'history', 'settings', 'tools', 'desktop_skills')
 _PAGE_COPY = {
     'memory': ('Visual Memory', 'Search information you explicitly saved.', None),
     'skills': ('Visual Skills', 'Teach AI to recognize the screenshots that matter to you.', 'Open Visual Skills'),
@@ -69,6 +73,7 @@ class MainWindow(QMainWindow):
     memory_ask_requested = Signal(str, object)
     memory_rebuild_requested = Signal()
     ai_runtime_requested = Signal()
+    mode_requested = Signal(str)
 
     def __init__(self, hotkey, parent=None, *, skills_storage=None, workflows_storage=None,
                  history=None, config=None, integration_registry=None, connection_storage=None, paths=None,
@@ -92,6 +97,10 @@ class MainWindow(QMainWindow):
         self._created_pages = {}
         self._private = bool(config and config.private_mode)
         self._hotkey = hotkey
+        self._automation_route = 'skills'
+        self._ai_error = False
+        self._ai_configured = False
+        self._navigation_open = False
         root = QWidget()
         self.setCentralWidget(root)
         row = QHBoxLayout(root)
@@ -110,31 +119,90 @@ class MainWindow(QMainWindow):
         brand_font.setBold(True)
         self.brand.setFont(brand_font)
         side.addWidget(self.brand)
-        self.privacy_indicator = AppButton('AI & Models')
-        self.privacy_indicator.clicked.connect(self.ai_runtime_requested)
-        side.addWidget(self.privacy_indicator)
-        side.addSpacing(SPACING['xl'])
+        side.addSpacing(SPACING['lg'])
         self.nav_buttons = {}
-        for page in PAGES:
-            name = page.title()
+        for page, name, icon_name in NAVIGATION:
+            if page == 'settings':
+                side.addStretch(1)
             button = QToolButton()
-            button.setIcon(icon('workflows' if page == 'agent' else page))
+            button.setIcon(icon(icon_name))
+            button.setProperty('theme_icon', icon_name)
+            button.setIconSize(QSize(20, 20))
             button.setText(name)
             button.setAccessibleName(name)
             button.setToolTip(name)
+            button.setProperty('role', 'navigation')
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             button.setCheckable(True)
             button.clicked.connect(lambda checked=False, key=page: self.open_page(key))
             self.nav_buttons[page] = button
             side.addWidget(button)
-            if page == 'history':
-                side.addStretch(1)
         row.addWidget(self.sidebar)
 
+        content = QWidget()
+        self.content_layout = QVBoxLayout(content)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(0)
+        self.header = QWidget()
+        header_row = QHBoxLayout(self.header)
+        header_row.setContentsMargins(24, 12, 24, 8)
+        self.menu_toggle = AppButton('Menu', variant='ghost')
+        self.menu_toggle.setCheckable(True)
+        self.menu_toggle.setAccessibleName('Open navigation menu')
+        self.menu_toggle.clicked.connect(self._toggle_navigation)
+        header_row.addWidget(self.menu_toggle)
+        self.back_to_tools = AppButton('‹ Tools', variant='ghost')
+        self.back_to_tools.clicked.connect(lambda: self.open_page('tools'))
+        header_row.addWidget(self.back_to_tools)
+        header_row.addStretch(1)
+        self.privacy_indicator = AppButton('AI & Models', variant='ghost')
+        self.privacy_indicator.clicked.connect(self.ai_runtime_requested)
+        header_row.addWidget(self.privacy_indicator)
+        self.content_layout.addWidget(self.header)
+
+        self.session_strip = QFrame()
+        self.session_strip.setProperty('role', 'session')
+        self.session_layout = QVBoxLayout(self.session_strip)
+        self.session_layout.setContentsMargins(24, 8, 24, 8)
+        self.session_layout.setSpacing(8)
+        self.teaching_row = QWidget()
+        self.teaching_row.setProperty('role', 'session_group')
+        teaching_layout = QHBoxLayout(self.teaching_row)
+        teaching_layout.setContentsMargins(0, 0, 0, 0)
+        self.teaching_controls = AppButton('Teaching controls…')
+        self.teaching_pause = AppButton('Pause Teaching')
+        self.teaching_finish = AppButton('Finish and Review…')
+        for button in (self.teaching_controls, self.teaching_pause, self.teaching_finish):
+            teaching_layout.addWidget(button)
+        self.session_layout.addWidget(self.teaching_row)
+        self.assistance_row = QWidget()
+        self.assistance_row.setProperty('role', 'session_group')
+        assistance_layout = QHBoxLayout(self.assistance_row)
+        assistance_layout.setContentsMargins(0, 0, 0, 0)
+        self.assistance_indicator = AppButton('Desktop Assistance · Active')
+        self.assistance_stop = AppButton('Stop Assistance')
+        assistance_layout.addWidget(self.assistance_indicator)
+        assistance_layout.addWidget(self.assistance_stop)
+        assistance_layout.addStretch(1)
+        self.session_layout.addWidget(self.assistance_row)
+        self.session_strip.hide()
+        self.content_layout.addWidget(self.session_strip)
+        self.section_tabs = QTabBar()
+        self.section_tabs.setExpanding(False)
+        self.section_tabs.setUsesScrollButtons(True)
+        self.section_tabs.setAccessibleName('Section navigation')
+        self.section_tabs.currentChanged.connect(self._section_changed)
+        self.content_layout.addWidget(self.section_tabs)
         self.stack = QStackedWidget()
         self.pages = _PageMap(self)
         self.launch_buttons = {}
-        row.addWidget(self.stack, 1)
+        self.content_layout.addWidget(self.stack, 1)
+        row.addWidget(content, 1)
+        self.escape_navigation = QShortcut(QKeySequence('Escape'), self)
+        self.escape_navigation.activated.connect(self._close_navigation)
+        self.navigation_scrim = NavigationScrim(root)
+        self.navigation_scrim.dismissed.connect(self._close_navigation)
         self.toast = ToastManager(root)
         self.open_page('home')
         self._update_navigation()
@@ -171,6 +239,10 @@ class MainWindow(QMainWindow):
     def _build_page(self, page):
         if page == 'home':
             widget = self._build_home(self._hotkey)
+        elif page == 'tools':
+            widget = self._build_tools()
+        elif page == 'desktop_skills':
+            widget = self._build_desktop_skills()
         elif page == 'agent':
             from src.ui.agent.page import AgentPage
             widget = AgentPage(self.memory_store)
@@ -236,8 +308,44 @@ class MainWindow(QMainWindow):
         agent = self.get_created_page('agent')
         if agent is not None:
             agent.set_privacy_state(self._private)
-        self.privacy_indicator.setText('PRIVATE MODE · Local' if private else 'AI & Models')
-        self.privacy_indicator.setToolTip('Local processing; external network operations blocked.' if private else 'Configure AI execution and privacy.')
+        self.set_ai_status(self._ai_configured, error=self._ai_error)
+
+    def set_ai_status(self, configured, *, error=False):
+        self._ai_configured, self._ai_error = bool(configured), bool(error)
+        local = self._private or bool(self.config and self.config.ai_execution_mode == 'local_only')
+        label = 'Private Mode' if self._private else 'Local AI' if local else 'AI & Models'
+        if error:
+            label += ' · Review error'
+        elif not configured:
+            label += ' · Setup needed'
+        self.privacy_indicator.setText(label)
+        self.privacy_indicator.setAccessibleName(label)
+        self.privacy_indicator.setToolTip(
+            'Private Mode blocks application-owned external requests. Review AI and local model settings.'
+            if self._private else 'Configure AI execution and privacy. A configured model has not necessarily been tested.')
+        if hasattr(self, 'setup_note'):
+            self.setup_note.setText('The last analysis failed. Review the result or check AI settings.' if error else
+                'Configure a local vision model to analyze screenshots.' if local else
+                'Choose an AI provider or local vision model to analyze screenshots.')
+            self.setup_section.setVisible(error or not configured)
+
+    def set_mode(self, mode):
+        self.mode_selector.blockSignals(True)
+        self.mode_selector.setCurrentIndex(self.mode_selector.findData(mode))
+        self.mode_selector.blockSignals(False)
+
+    def set_session_state(self, *, teaching=False, paused=False, pause_enabled=False,
+                          finish_enabled=False, assistance=False):
+        self.teaching_controls.setText('Teaching paused · Controls…' if paused else 'Teaching active · Controls…')
+        self.teaching_pause.setText('Resume Teaching' if paused else 'Pause Teaching')
+        self.teaching_controls.setAccessibleName(self.teaching_controls.text())
+        self.teaching_pause.setAccessibleName(self.teaching_pause.text())
+        self.teaching_pause.setEnabled(pause_enabled)
+        self.teaching_finish.setEnabled(finish_enabled)
+        self.teaching_row.setVisible(teaching)
+        self.assistance_row.setVisible(assistance)
+        self.assistance_indicator.setText('Desktop Assistance · Active')
+        self.session_strip.setVisible(teaching or assistance)
 
     def _scroll_page(self):
         scroll = QScrollArea()
@@ -251,41 +359,70 @@ class MainWindow(QMainWindow):
 
     def _build_home(self, hotkey):
         page, layout = self._scroll_page()
-        layout.addWidget(PageHeader('Home', 'Turn what you see into useful workflows.'))
+        layout.addWidget(PageHeader('Home', 'Capture a moment. Make sense of it.'))
         capture = Card()
-        title = QLabel('Capture anything on your screen')
+        title = QLabel('Capture your screen')
         title_font = title.font()
-        title_font.setPointSize(15)
+        title_font.setPointSize(18)
         title_font.setBold(True)
         title.setFont(title_font)
         capture.content.addWidget(title)
-        capture.content.addWidget(QLabel('Select an area. Smart Mode can identify a Visual Skill and suggest the next step.'))
+        description = QLabel('Select an area, then ask a question or choose an analysis mode.')
+        description.setWordWrap(True)
+        description.setProperty('role', 'muted')
+        capture.content.addWidget(description)
+        self.capture_controls = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.capture_button = AppButton('Capture Screenshot', variant='primary')
+        self.capture_button.setIcon(icon('capture', primary=True))
+        self.capture_button.setProperty('theme_icon', 'capture')
+        self.capture_button.clicked.connect(self.capture_requested)
+        self.capture_controls.addWidget(self.capture_button)
         self.hotkey_label = QLabel(' + '.join(part.capitalize() for part in hotkey.split('+')))
         self.hotkey_label.setProperty('role', 'muted')
-        capture.content.addWidget(self.hotkey_label)
-        self.capture_button = AppButton('Capture Screenshot', variant='primary')
-        self.capture_button.setIcon(icon('capture'))
-        self.capture_button.clicked.connect(self.capture_requested)
-        capture.content.addWidget(self.capture_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        self.capture_controls.addWidget(self.hotkey_label)
+        self.capture_controls.addStretch(1)
+        capture.content.addLayout(self.capture_controls)
+        mode_row = QHBoxLayout()
+        mode_label = QLabel('Analysis mode')
+        self.mode_selector = QComboBox()
+        self.mode_selector.setAccessibleName('Screenshot analysis mode')
+        for value, label in MODES.items():
+            self.mode_selector.addItem(label, value)
+        mode_label.setBuddy(self.mode_selector)
+        self.set_mode(self.config.default_mode if self.config else 'smart')
+        self.mode_selector.currentIndexChanged.connect(
+            lambda _: self.mode_requested.emit(self.mode_selector.currentData()))
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.mode_selector)
+        mode_row.addStretch(1)
+        capture.content.addLayout(mode_row)
         layout.addWidget(capture)
-        status = Card()
-        status.content.addWidget(QLabel('Smart Mode'))
-        status.content.addWidget(Badge('Ready', status='success'), alignment=Qt.AlignmentFlag.AlignLeft)
-        layout.addWidget(status)
-        recent = Card()
-        recent.content.addWidget(QLabel('Recent Workflows'))
+        self.setup_section = QWidget()
+        setup_layout = QVBoxLayout(self.setup_section)
+        setup_layout.setContentsMargins(0, 0, 0, 0)
+        self.setup_note = QLabel()
+        self.setup_note.setWordWrap(True)
+        self.setup_note.setProperty('role', 'muted')
+        setup_layout.addWidget(self.setup_note)
+        configure = AppButton('Configure AI', variant='ghost')
+        configure.clicked.connect(self.ai_runtime_requested)
+        setup_layout.addWidget(configure, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.setup_section)
+        self.recent_section = QWidget()
+        recent_layout = QVBoxLayout(self.recent_section)
+        recent_layout.setContentsMargins(0, 0, 0, 0)
+        recent_header = QHBoxLayout()
+        recent_header.addWidget(QLabel('Recent workflow runs'), 1)
+        view_all = AppButton('View all', variant='ghost')
+        view_all.clicked.connect(lambda: self.open_page('history'))
+        recent_header.addWidget(view_all)
+        recent_layout.addLayout(recent_header)
         self.recent_workflows = QLabel()
+        self.recent_workflows.setTextFormat(Qt.TextFormat.PlainText)
         self.recent_workflows.setWordWrap(True)
         self.recent_workflows.setProperty('role', 'muted')
-        recent.content.addWidget(self.recent_workflows)
-        layout.addWidget(recent)
-        integrations = Card()
-        integrations.content.addWidget(QLabel('Integrations'))
-        self.integration_summary = QLabel()
-        self.integration_summary.setWordWrap(True)
-        self.integration_summary.setProperty('role', 'muted')
-        integrations.content.addWidget(self.integration_summary)
-        layout.addWidget(integrations)
+        recent_layout.addWidget(self.recent_workflows)
+        layout.addWidget(self.recent_section)
         layout.addStretch(1)
         self._refresh_home()
         return page
@@ -294,15 +431,45 @@ class MainWindow(QMainWindow):
         entries = self.history.list_entries()[-3:] if self.history else []
         self.recent_workflows.setText('\n'.join(
             f"{entry['workflow_name']} · {entry['status'].replace('_', ' ').title()}"
-            for entry in reversed(entries)) if entries else 'No workflow runs yet.')
-        google = self.connection_storage.get('google') if self.connection_storage else None
-        todoist = self.connection_storage.get('todoist') if self.connection_storage else None
-        lines = []
-        for name, capability in (('Google Calendar', 'google_calendar'), ('Google Sheets', 'google_sheets')):
-            active = google and google.status == 'connected' and capability in google.granted_capabilities
-            lines.append(f"{name}: {'Connected' if active else 'Not connected'}")
-        lines.append(f"Todoist: {'Connected' if todoist and todoist.status == 'connected' else 'Not connected'}")
-        self.integration_summary.setText('\n'.join(lines))
+            for entry in reversed(entries)))
+        self.recent_section.setVisible(bool(entries))
+
+    def _build_tools(self):
+        page, layout = self._scroll_page()
+        layout.addWidget(PageHeader('Tools', 'Choose what you want to work on.'))
+        self.tool_commands = {}
+        for key, title, description, icon_name, route, feature in (
+            ('agent', 'Agent', 'Plan a task, review the steps, then choose what to run.', 'agent', 'agent', None),
+            ('desktop_context', 'Desktop Context', 'Review an application or start an assistance session.', 'tools', None, 'desktop_context'),
+            ('connections', 'Connections', 'Manage connected services and extensions.', 'integrations', 'integrations', None),
+        ):
+            button = ActionRow(title, description, icon_name)
+            if route:
+                button.clicked.connect(lambda checked=False, target=route: self.open_page(target))
+            else:
+                button.clicked.connect(lambda checked=False, target=feature: self.feature_requested.emit(target))
+            self.tool_commands[key] = button
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return page
+
+    def _build_desktop_skills(self):
+        page, layout = self._scroll_page()
+        layout.addWidget(PageHeader('Desktop Skills', 'Beta · Teach a task, then review every step.'))
+        note = QLabel('Enable Demonstration Automation in Settings → Help & Diagnostics → Beta Features. '
+                      'Visual Skills recognize screenshot content; Desktop Skills perform reviewed application actions.')
+        note.setWordWrap(True)
+        note.setProperty('role', 'muted')
+        layout.addWidget(note)
+        for label, detail, icon_name, feature in (
+            ('Open Desktop Skills', 'Browse saved tasks, review steps and run a published version.', 'skills', 'desktop_skills'),
+            ('Teach a task', 'Choose an application and demonstrate the task explicitly.', 'workflows', 'teach'),
+        ):
+            button = ActionRow(label, detail, icon_name)
+            button.clicked.connect(lambda checked=False, target=feature: self.feature_requested.emit(target))
+            layout.addWidget(button)
+        layout.addStretch(1)
+        return page
 
     def _build_feature_page(self, key):
         title, subtitle, launch_label = _PAGE_COPY[key]
@@ -320,6 +487,10 @@ class MainWindow(QMainWindow):
         return page
 
     def open_page(self, page):
+        if page == 'automations':
+            page = self._automation_route
+        elif page == 'connections':
+            page = 'integrations'
         if page not in self.pages:
             raise ValueError('Unknown page.')
         widget = self.pages[page]
@@ -333,17 +504,88 @@ class MainWindow(QMainWindow):
         elif page in ('memory', 'skills', 'workflows', 'evaluation', 'history', 'integrations') and hasattr(widget, 'refresh'):
             widget.refresh()
         self.stack.setCurrentWidget(widget)
+        if page in AUTOMATION_ROUTES:
+            self._automation_route = page
         for key, button in self.nav_buttons.items():
-            button.setChecked(key == page)
+            button.setChecked(key == parent_route(page))
+        self._update_section_tabs(page)
+        self._close_navigation()
+
+    def _update_section_tabs(self, page):
+        tabs = AUTOMATION_TABS if page in AUTOMATION_ROUTES else (
+            CONNECTION_TABS if page in ('integrations', 'extensions') else ())
+        self.section_tabs.blockSignals(True)
+        while self.section_tabs.count():
+            self.section_tabs.removeTab(0)
+        for key, label in tabs:
+            index = self.section_tabs.addTab(label)
+            self.section_tabs.setTabData(index, key)
+            if key == page:
+                self.section_tabs.setCurrentIndex(index)
+        self.section_tabs.blockSignals(False)
+        self.section_tabs.setVisible(bool(tabs))
+        self.back_to_tools.setVisible(page in ('agent', 'integrations', 'extensions'))
+
+    def _section_changed(self, index):
+        if index >= 0:
+            self.open_page(self.section_tabs.tabData(index))
+
+    def _toggle_navigation(self):
+        self._navigation_open = self.menu_toggle.isChecked()
+        self._update_navigation()
+        if self._navigation_open:
+            self.nav_buttons[parent_route(self.current_page)].setFocus()
+
+    def _close_navigation(self):
+        was_open = self._navigation_open
+        self._navigation_open = False
+        self.menu_toggle.setChecked(False)
+        self._update_navigation()
+        if was_open and self.width() < 760:
+            self.menu_toggle.setFocus()
 
     def _update_navigation(self):
-        collapsed = self.width() < 760
-        self.sidebar.setFixedWidth(64 if collapsed else 212)
-        self.brand.setVisible(not collapsed)
-        for key, button in self.nav_buttons.items():
-            button.setText('' if collapsed else key.title())
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly if collapsed else
-                                      Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        compact = self.width() < 760
+        if not compact:
+            self._navigation_open = False
+            self.menu_toggle.setChecked(False)
+        self.menu_toggle.setVisible(compact)
+        self.menu_toggle.setAccessibleName('Close navigation menu' if self._navigation_open else 'Open navigation menu')
+        self.sidebar.setFixedWidth(196)
+        root = self.centralWidget()
+        if compact and self._navigation_open:
+            root.layout().removeWidget(self.sidebar)
+            if self.sidebar.parentWidget() is not self.navigation_scrim:
+                self.sidebar.setParent(self.navigation_scrim)
+            top = self.header.height()
+            self.navigation_scrim.setGeometry(0, top, root.width(), max(0, root.height() - top))
+            self.sidebar.setGeometry(0, 0, 196, self.navigation_scrim.height())
+            self.navigation_scrim.show()
+            self.sidebar.show()
+            self.navigation_scrim.raise_()
+        else:
+            self.navigation_scrim.hide()
+            if compact:
+                self.sidebar.hide()
+            else:
+                if self.sidebar.parentWidget() is not root:
+                    self.sidebar.setParent(root)
+                if root.layout().indexOf(self.sidebar) < 0:
+                    root.layout().insertWidget(0, self.sidebar)
+                self.sidebar.show()
+        if hasattr(self, 'capture_controls'):
+            self.capture_controls.setDirection(QBoxLayout.Direction.TopToBottom if compact else QBoxLayout.Direction.LeftToRight)
+
+    def focusNextPrevChild(self, next):
+        if self._navigation_open and self.width() < 760:
+            controls = [self.menu_toggle, *self.nav_buttons.values()]
+            controls = [button for button in controls if button.isVisible() and button.isEnabled()]
+            current = self.focusWidget()
+            index = controls.index(current) if current in controls else -1
+            controls[(index + (1 if next else -1)) % len(controls)].setFocus(
+                Qt.FocusReason.TabFocusReason if next else Qt.FocusReason.BacktabFocusReason)
+            return True
+        return super().focusNextPrevChild(next)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

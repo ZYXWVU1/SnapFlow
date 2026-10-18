@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QActionGroup, QCursor, QDesktopServices, QIcon, QImage
+from PySide6.QtGui import QCursor, QDesktopServices, QIcon, QImage
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon, QStyle
 from src.config import Config, load_config, save_config
 from src.paths import AppPaths
@@ -433,34 +433,16 @@ class ApplicationController(QObject):
         self.server_service.workflow_bridge = self.workflow_bridge
         self.server_service.start()
         self.tray.setToolTip(APP_NAME)
-        self.menu = QMenu()
-        self.home_action = self.menu.addAction("Open Home", self.open_home)
-        self.menu.addAction("Visual Memory", self.open_memory)
-        self.capture_action = self.menu.addAction("Capture Screenshot", self.capture)
-        self.menu.addSeparator()
-        mode_menu = self.menu.addMenu("Mode")
-        self.mode_group = QActionGroup(self)
-        self.mode_actions = {}
-        for value, label in MODES.items():
-            action = mode_menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(value == self.mode)
-            action.triggered.connect(lambda checked=False, mode=value: self.change_mode(mode))
-            self.mode_group.addAction(action)
-            self.mode_actions[value] = action
-        self.menu.addAction("Settings", self.open_settings)
-        self.menu.addAction("Visual Skills", self.open_skills)
-        self.menu.addAction("Visual Workflows", self.open_workflows)
-        self.menu.addAction('Desktop Context…', self.desktop_controller.show)
-        self.menu.addAction('Desktop Actions…', self.desktop_actions_controller.show_settings)
-        self.menu.addAction('Automation Skills…', self.automation_controller.show)
-        self.automation_controller.teach_action = self.menu.addAction('Teach SnapFlow…', self.automation_controller.teach)
-        self.menu.addAction('Pause / Resume Teaching', self.automation_controller.pause_teaching)
-        self.menu.addAction('Stop Teaching and Discard', lambda: self.automation_controller.teach_dialog.reject() if self.automation_controller.teach_dialog else None)
-        self.desktop_controller.session_action = self.menu.addAction('Start Desktop Assistance…', self.desktop_controller.request_start)
-        self.menu.addAction('Stop Desktop Assistance', self.desktop_controller.stop)
-        self.menu.addSeparator()
-        self.menu.addAction("Quit", self.quit)
+        from src.ui.tray_menu import TrayMenu
+        self.tray_menu = TrayMenu(self)
+        self.menu = self.tray_menu.menu
+        self.home_action = self.tray_menu.home_action
+        self.capture_action = self.tray_menu.capture_action
+        self.mode_group = self.tray_menu.mode_group
+        self.mode_actions = self.tray_menu.mode_actions
+        self.main_window.mode_requested.connect(self.change_mode)
+        self.capture_action.changed.connect(self.refresh_ui_state)
+        self.refresh_ui_state()
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.tray_activated)
         self.tray.show()
@@ -546,12 +528,32 @@ class ApplicationController(QObject):
         return self.beta_feedback.snapshot(config=self.config, observability=self.observability,
             crash_reporter=self.crash_reporter, resources=self.resource_snapshot, flags=self.beta_features)
 
+    def refresh_ui_state(self):
+        tray = getattr(self, 'tray_menu', None)
+        if tray is not None:
+            tray.refresh()
+        config = self.config
+        local = bool(config.local_ai_model and config.local_ai_vision)
+        cloud = bool(os.getenv('AI_API_KEY')) and not config.private_mode
+        mode = config.ai_execution_mode
+        if config.private_mode or mode == 'local_only':
+            configured = local
+        elif mode == 'cloud_only':
+            configured = cloud
+        elif mode == 'ask_every_time':
+            configured = local or cloud
+        else:
+            configured = local or (cloud and config.allow_cloud_fallback)
+        self.main_window.set_ai_status(configured, error=self.main_window._ai_error)
+
     def refresh_beta_controls(self):
         if getattr(self, 'agent_controller', None):
             self.agent_controller.refresh_enabled()
         page = self.main_window.get_created_page('settings')
         if page is not None:
             self._refresh_settings_beta(page)
+
+        self.refresh_ui_state()
 
     def _refresh_settings_beta(self, page):
         page.beta_insights_button.setEnabled(self.beta_features.enabled('beta_insights'))
@@ -1161,6 +1163,8 @@ class ApplicationController(QObject):
             self.semantic_rebuild_cancel.set()
         self.configure_semantic_memory()
         self.main_window.set_privacy_state(self.config.private_mode)
+        self.main_window._ai_error = False
+        self.refresh_ui_state()
         page = self.main_window.get_created_page('memory')
         if page is not None:
             page.set_semantic_available(self.memory_store.semantic_index is not None)
@@ -1231,6 +1235,12 @@ class ApplicationController(QObject):
             self.workflow_manager.show_history()
         elif page == 'settings':
             self.open_settings()
+        elif page == 'desktop_context':
+            self.desktop_controller.show()
+        elif page == 'desktop_skills':
+            self.automation_controller.show()
+        elif page == 'teach':
+            self.automation_controller.teach()
 
     def connect_integration(self, integration_id: str):
         if self.quitting or integration_id in self.integration_jobs:
@@ -1595,6 +1605,8 @@ class ApplicationController(QObject):
         if self.quitting:
             QTimer.singleShot(0, self.finish_quit)
         elif worker is not None and request_id == self.request_id:
+            self.main_window._ai_error = bool(error)
+            self.refresh_ui_state()
             if isinstance(worker, AnalysisWorker) and (worker.configuration is not self.client.config or
                     worker.private_at_start != self.client.policy.private_mode):
                 text, error = 'AI settings changed during this request. Retry using the current policy.', True
@@ -1816,12 +1828,15 @@ class ApplicationController(QObject):
 
     def change_mode(self, mode: str, analyze: bool = True) -> None:
         if self.workers:
+            self.refresh_ui_state()
             return
         self.result.set_notice()
         self.retry_skill = None
         self.failed_question = None
         self.mode = mode
+        self.main_window.set_mode(mode)
         self.mode_actions[mode].setChecked(True)
+        self.refresh_ui_state()
         self.result.mode.blockSignals(True)
         self.result.mode.setCurrentIndex(self.result.mode.findData(mode))
         self.result.mode.blockSignals(False)
@@ -2006,6 +2021,8 @@ class ApplicationController(QObject):
             os.environ['AI_API_KEY'] = key
             self.api_key_source = 'credential'
             self.api_key_stored = True
+        self.main_window._ai_error = False
+        self.refresh_ui_state()
         if self.onboarding_dialog:
             self.onboarding_dialog.accept()
 
@@ -2083,6 +2100,8 @@ class ApplicationController(QObject):
             self.settings.key.clear()
             self.settings.refresh_api_key_state(
                 configured=bool(os.getenv("AI_API_KEY")), stored=False)
+        self.main_window._ai_error = False
+        self.refresh_ui_state()
 
     def export_backup(self) -> None:
         self.paths.backup_dir.mkdir(parents=True, exist_ok=True)
@@ -2354,6 +2373,7 @@ class ApplicationController(QObject):
         self.sync_observability_preferences()
         self.theme_manager.set_preference(config.theme)
         self.main_window.hotkey_label.setText(' + '.join(part.capitalize() for part in config.hotkey.split('+')))
+        self.refresh_ui_state()
         if key:
             os.environ["AI_API_KEY"] = key
             self.api_key_source = "credential"

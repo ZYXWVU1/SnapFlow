@@ -62,18 +62,10 @@ class DesktopController(QObject):
         self.panel.settings_requested.connect(self.open_settings)
         self.panel.start_requested.connect(self.request_start)
         self.panel.stop_requested.connect(self.stop)
-        self.indicator = AppButton('Desktop Assistance · Off', variant='secondary')
+        self.indicator = owner.main_window.assistance_indicator
         self.indicator.clicked.connect(self.show)
-        owner.main_window.sidebar.layout().insertWidget(2, self.indicator)
         self.banner = SuggestionBanner(owner.main_window)
-        shell_layout = owner.main_window.centralWidget().layout()
-        shell_layout.removeWidget(owner.main_window.stack)
-        column = QWidget(owner.main_window)
-        column_layout = QVBoxLayout(column)
-        column_layout.setContentsMargins(0, 0, 0, 0)
-        column_layout.addWidget(self.banner)
-        column_layout.addWidget(owner.main_window.stack, 1)
-        shell_layout.addWidget(column, 1)
+        owner.main_window.content_layout.insertWidget(1, self.banner)
         self.result_banner = SuggestionBanner(owner.result)
         owner.result.layout().insertWidget(1, self.result_banner)
         for banner in (self.banner, self.result_banner):
@@ -126,7 +118,8 @@ class DesktopController(QObject):
             ' · No background context reads.'))
         if self.session_action:
             self.session_action.setText('Stop Desktop Assistance' if active else 'Start Desktop Assistance…')
-        self.owner.tray.setToolTip('SnapFlow · Desktop Assistance active' if active else 'SnapFlow')
+        if hasattr(self.owner, 'refresh_ui_state'):
+            self.owner.refresh_ui_state()
 
     def request_capture(self):
         dialog = ContextPermissionDialog(self.permissions, self.panel)

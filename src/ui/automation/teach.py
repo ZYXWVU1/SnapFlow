@@ -92,7 +92,6 @@ class TeachDialog(QDialog):
             self.permission_version = self.owner.desktop_controller.service.permissions.version
             self.recorder.start(self.goal.text().strip(), tuple(self.fences))
             self.observer.start(self.fences)
-            self.active_changed.emit(True)
             self.status.setText('TEACH MODE ACTIVE · Connecting to the selected applications…')
             self.goal.setEnabled(False)
             self.add.setEnabled(False)
@@ -100,6 +99,7 @@ class TeachDialog(QDialog):
             self.pause_button.setEnabled(True)
             self.checkpoint_button.setEnabled(True)
             self.timer.start()
+            self.active_changed.emit(True)
         except Exception:
             self.observer.close()
             self.recorder.cancel()
@@ -111,6 +111,8 @@ class TeachDialog(QDialog):
             not permissions.is_blocked(f.allowed_process_name) for f in self.fences)
 
     def tick(self):
+        before = (self.finish_button.isEnabled(), self.pause_button.isEnabled(),
+                  self.recorder.session.status if self.recorder.session else None)
         try:
             self.observer.drain()
             if self.recorder.session is None:
@@ -132,6 +134,11 @@ class TeachDialog(QDialog):
             self.finish_button.setEnabled(False)
             self.pause_button.setEnabled(False)
             self.checkpoint_button.setEnabled(False)
+        finally:
+            after = (self.finish_button.isEnabled(), self.pause_button.isEnabled(),
+                     self.recorder.session.status if self.recorder.session else None)
+            if before != after:
+                self.active_changed.emit(bool(self.recorder.session))
 
     def pause(self):
         if not self.recorder.session:
@@ -148,6 +155,7 @@ class TeachDialog(QDialog):
                 self.pause_button.setText('Pause')
             except Exception:
                 self.reject()
+        self.active_changed.emit(bool(self.recorder.session))
 
     def checkpoint(self):
         if self.checkpoint_job:
@@ -161,8 +169,10 @@ class TeachDialog(QDialog):
             self.checkpoint_button.setEnabled(True)
             if error:
                 self.status.setText('Checkpoint unavailable. Select the target application and try again.')
+            self.active_changed.emit(bool(self.recorder.session))
         job.signals.finished.connect(finished, Qt.ConnectionType.QueuedConnection)
         self.pool.start(job)
+        self.active_changed.emit(bool(self.recorder.session))
 
     def finish(self):
         try:

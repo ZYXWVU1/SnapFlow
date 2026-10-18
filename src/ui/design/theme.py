@@ -32,6 +32,7 @@ class ThemeManager(QObject):
             raise ValueError('Unknown theme preference.')
         self.preference = preference
         self.effective_theme = self._system_theme() if preference == 'system' else preference
+        self.app.setProperty('effective_theme', self.effective_theme)
         families = QFontDatabase.families()
         if not families and os.name == 'nt':
             installed = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / 'segoeui.ttf'
@@ -42,3 +43,8 @@ class ThemeManager(QObject):
                          self.app.font().family())
         self.app.setFont(QFont(font_name, 10))
         self.app.setStyleSheet(stylesheet(DARK if self.effective_theme == 'dark' else LIGHT))
+        from .icons import icon
+        for widget in self.app.allWidgets():
+            name = widget.property('theme_icon')
+            if name:
+                widget.setIcon(icon(name, primary=widget.property('variant') == 'primary'))

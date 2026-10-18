@@ -1,7 +1,7 @@
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from datetime import date
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap, QTextCursor
-from PySide6.QtWidgets import QApplication, QComboBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QMenu, QSizePolicy, QApplication, QComboBox, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QPushButton, QScrollArea, QTextEdit, QVBoxLayout, QWidget
 
 from src.app_version import APP_NAME
 from src.prompts import MODES
@@ -37,22 +37,25 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.configure_focus_topmost(always_on_top)
         self.setWindowTitle(APP_NAME)
         self.resize(720, 680)
-        self.setMinimumSize(340, 260)
+        self.setMinimumSize(340, 360)
+        self._busy = False
+        self._followup_available = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACING['xl'], SPACING['xl'], SPACING['xl'], SPACING['xl'])
         layout.setSpacing(SPACING['md'])
-        layout.addWidget(PageHeader('Screenshot result', 'Review what the app understood and choose what happens next.'))
+        self.result_header = PageHeader('Screenshot result', 'Ask a question or use the result.')
+        layout.addWidget(self.result_header)
         top = QHBoxLayout()
         self.mode = QComboBox()
         for value, label in MODES.items():
             self.mode.addItem(label, value)
         self.mode.setCurrentIndex(self.mode.findData(mode))
-        top.addWidget(QLabel("Mode"))
+        self.mode.setAccessibleName('Result analysis mode')
+        mode_label = QLabel('Analysis mode')
+        mode_label.setBuddy(self.mode)
+        top.addWidget(mode_label)
         top.addWidget(self.mode)
         top.addStretch()
-        settings = AppButton("Settings", variant='ghost')
-        settings.clicked.connect(self.settings_requested)
-        top.addWidget(settings)
         layout.addLayout(top)
         self.notice = QLabel()
         self.notice.setTextFormat(Qt.TextFormat.PlainText)
@@ -69,6 +72,7 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         body.setSpacing(SPACING['lg'])
         layout.addWidget(self.content_scroll, 1)
         self.result_card = Card()
+        self.result_card.content.setContentsMargins(16, 16, 16, 16)
         body.addWidget(self.result_card)
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -77,12 +81,20 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.text = QTextEdit()
         self.text.setReadOnly(True)
         self.text.setMinimumHeight(180)
+        self.text.setAccessibleName('Screenshot answer')
+        self.text.setProperty('role', 'answer')
+        self.text.setFrameShape(QFrame.Shape.NoFrame)
+        answer_font = self.text.font()
+        answer_font.setPointSize(11)
+        self.text.setFont(answer_font)
         self.result_card.content.addWidget(self.text)
         self.structured = StructuredResult()
+        self.structured.setMinimumHeight(300)
         self.structured.hide()
         self.result_card.content.addWidget(self.structured)
         self.action_card = Card()
-        self.action_card.content.addWidget(QLabel('Actions'))
+        self.action_card.content.setContentsMargins(16, 16, 16, 16)
+        self.action_card.content.addWidget(QLabel('Use this result'))
         self.actions_layout = QGridLayout()
         self.action_buttons = {}
         self.google_calendar_connected = False
@@ -124,7 +136,10 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         followup_layout.setContentsMargins(0, 0, 0, 0)
         self.followup = QLineEdit()
         self.followup.setPlaceholderText('Ask a follow-up about this screenshot…')
+        self.followup.setAccessibleName('Follow-up question')
         self.send = AppButton('Send', variant='primary')
+        self.send.setEnabled(False)
+        self.followup.textChanged.connect(self._update_send_state)
         followup_layout.addWidget(self.followup)
         followup_layout.addWidget(self.send)
         layout.addWidget(self.followup_row)
@@ -132,18 +147,60 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.send.clicked.connect(self.send_followup)
         self.followup.returnPressed.connect(self.send_followup)
         buttons = QHBoxLayout()
-        self.copy = AppButton("Copy")
-        self.again = AppButton("Ask Again", variant='primary')
-        self.agent_button = AppButton('Start Agent Task', variant='secondary')
-        self.agent_button.clicked.connect(self.agent_requested)
-        close = AppButton("Close", variant='ghost')
-        for button in (self.copy, self.again, self.agent_button, close):
-            buttons.addWidget(button)
+        self.copy = AppButton('Copy')
+        self.again = AppButton('Ask Again')
+        self.more = AppButton('More', variant='ghost')
+        self.more.setAccessibleName('More result actions')
+        self.more_menu = QMenu(self.more)
+        self.agent_action = self.more_menu.addAction('Start Agent Task', self.agent_requested.emit)
+        self.agent_button = self.agent_action
+        self.settings_action = self.more_menu.addAction('Settings…', self.settings_requested.emit)
+        self.more_menu.addSeparator()
+        self.more_menu.addAction('Close Result', self.close)
+        self.more.setMenu(self.more_menu)
+        buttons.addWidget(self.copy)
+        buttons.addWidget(self.again)
+        buttons.addStretch(1)
+        buttons.addWidget(self.more)
         layout.addLayout(buttons)
-        self.copy.clicked.connect(lambda: QApplication.clipboard().setText(self.text.toPlainText()))
+        self.copy_feedback = QTimer(self)
+        self.copy_feedback.setSingleShot(True)
+        self.copy_feedback.timeout.connect(self._reset_copy_feedback)
+        self.copy.clicked.connect(self.copy_answer)
         self.again.clicked.connect(self.ask_again)
-        close.clicked.connect(self.close)
         self.mode.currentIndexChanged.connect(lambda: self.mode_changed.emit(self.mode.currentData()))
+
+    def _set_stage(self, stage):
+        title, subtitle = {
+            'answer': ('Screenshot result', 'Ask a question or use the result.'),
+            'busy': ('Analyzing screenshot', 'Your result will appear here.'),
+            'error': ('Analysis failed', 'Read the message, then retry or open More → Settings.'),
+            'preview': ('Capture preview', 'No AI request was sent.'),
+        }[stage]
+        self.result_header.title_label.setText(title)
+        self.result_header.subtitle_label.setText(subtitle)
+        heading = self.result_header.title_label
+        heading.setProperty('status', 'error' if stage == 'error' else None)
+        heading.style().unpolish(heading)
+        heading.style().polish(heading)
+
+    def _update_send_state(self):
+        self.send.setEnabled(not self._busy and self._followup_available and bool(self.followup.text().strip()))
+        self.send.setToolTip('Wait for the current analysis to finish.' if self._busy else
+                             'Send your question.' if self.send.isEnabled() else 'Enter a question to send.')
+
+    def _reset_copy_feedback(self):
+        self.copy_feedback.stop()
+        self.copy.setText('Copy')
+        self.copy.setAccessibleName('Copy answer')
+
+    def copy_answer(self):
+        if not self.copy.isEnabled():
+            return
+        QApplication.clipboard().setText(self.text.toPlainText())
+        self.copy.setText('Copied')
+        self.copy.setAccessibleName('Answer copied to clipboard')
+        self.copy_feedback.start(1800)
 
     def clear_actions(self):
         self.action_status.clear()
@@ -286,7 +343,9 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
     def set_result(self, result: ModeResult, conversation: str | None = None):
         self.set_response(conversation if conversation is not None else result.text)
         self.again.setText('Ask Again' if result.mode in ('explain', 'translate') else 'Retry')
-        self.followup_row.setVisible(result.mode == 'ask')
+        self._followup_available = result.mode == 'ask'
+        self.followup_row.setVisible(self._followup_available)
+        self._update_send_state()
         self._add_context_action()
         if result.data is None:
             if self.memory_save_enabled:
@@ -316,9 +375,25 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
 
     def add_action(self, label, button):
         self.action_card.show()
-        index = len(self.action_buttons)
         self.action_buttons[label] = button
-        self.actions_layout.addWidget(button, index // 3, index % 3)
+        button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        if not button.toolTip():
+            button.setToolTip(label)
+        self._reflow_actions()
+
+    def _reflow_actions(self):
+        available = max(1, self.content_scroll.viewport().width() - 2 * SPACING['xl'] - SPACING['sm'])
+        preferred = max((button.sizeHint().width() for button in self.action_buttons.values()), default=240)
+        columns = max(1, min(3, available // max(240, preferred)))
+        while self.actions_layout.count():
+            self.actions_layout.takeAt(0)
+        for index, button in enumerate(self.action_buttons.values()):
+            self.actions_layout.addWidget(button, index // columns, index % columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'action_buttons'):
+            self._reflow_actions()
 
     def _add_context_action(self):
         if not self.context_enabled:
@@ -337,6 +412,10 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.preview.hide()
 
     def set_busy(self, message: str = 'Analyzing screenshot...') -> None:
+        self._busy = True
+        self._set_stage('busy')
+        self._followup_available = False
+        self._reset_copy_feedback()
         self._partial_started = False
         self.agent_button.setEnabled(False)
         self.clear_actions()
@@ -344,7 +423,7 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.followup_row.hide()
         self.text.show()
         self.copy.show()
-        self.send.setEnabled(False)
+        self._update_send_state()
         self.clear_preview()
         self.text.setPlainText(message)
         self.copy.setEnabled(False)
@@ -359,6 +438,10 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.text.insertPlainText(text)
 
     def set_response(self, text: str, error: bool = False) -> None:
+        self._set_stage('error' if error else 'answer')
+        self._busy = False
+        self._followup_available = False
+        self._reset_copy_feedback()
         self._partial_started = False
         self.agent_button.setEnabled(not error)
         if error:
@@ -369,7 +452,7 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
         self.clear_preview()
         self.text.show()
         self.copy.show()
-        self.send.setEnabled(True)
+        self._update_send_state()
         self.text.setPlainText(text)
         self.copy.setEnabled(not error)
         self.again.setEnabled(True)
@@ -377,6 +460,7 @@ class ResultWindow(FocusAwareTopmostMixin, QWidget):
 
     def show_preview(self, image: QImage) -> None:
         self.set_response('')
+        self._set_stage('preview')
         self.preview.setPixmap(QPixmap.fromImage(image).scaled(460, 240, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         self.preview.show()
         self.text.setPlainText("Preview mode: screenshot captured in memory. No AI request was sent.")

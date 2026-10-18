@@ -1,10 +1,13 @@
 """Consistent monochrome line icons rendered from small local SVGs."""
 from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
+from .tokens import DARK, LIGHT
 from PySide6.QtSvg import QSvgRenderer
 
 
 _SHAPES = {
+    'tools': '<path d="m14 5 5 5M4 20l8-8M14 4a5 5 0 0 0-6 6L3 15a3 3 0 0 0 4 4l5-5a5 5 0 0 0 6-6l-4 2-2-2z"/>',
+    'agent': '<rect x="4" y="6" width="16" height="14" rx="4"/><path d="M12 3v3M8 16h8M8 11h1M15 11h1"/>',
     'extensions': '<path d="M4 4h6V2a2 2 0 0 1 4 0v2h6v6h2a2 2 0 0 1 0 4h-2v6h-6v-2a2 2 0 0 0-4 0v2H4v-6h2a2 2 0 0 0 0-4H4z"/>',
     'home': '<path d="M3 11 12 4l9 7v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-7h6v7"/>',
     'memory': '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
@@ -18,7 +21,11 @@ _SHAPES = {
 }
 
 
-def icon(name, color='#68788D'):
+def icon(name, color=None, *, primary=False):
+    if color is None:
+        app = QGuiApplication.instance()
+        colors = DARK if app and app.property('effective_theme') == 'dark' else LIGHT
+        color = colors.accent_text if primary else colors.text_secondary
     shape = _SHAPES[name]
     source = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
               f'fill="none" stroke="{color}" stroke-width="1.8" '

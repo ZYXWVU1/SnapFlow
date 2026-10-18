@@ -38,13 +38,15 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-The app starts in the system tray. Choose **Capture Screenshot** or press **Ctrl+Shift+S**, select a region, and review the result. Press **Esc** to cancel a selection. Choose **Quit** from the tray menu to exit.
+The app starts in the system tray. Choose **Capture Screenshot** or press **Ctrl+Shift+S**, select a region, and review the result. Press **Esc** to cancel a selection. Choose **Quit SnapFlow** from the tray menu to exit.
 
 To preview screen capture without making a provider request:
 
 ```powershell
 python main.py --preview
 ```
+
+The result window keeps Copy, Retry / Ask Again and More in its footer. Use **More → Start Agent Task** for a mission, or **More → Settings** to configure AI.
 
 ## Configure an AI provider
 
@@ -76,7 +78,7 @@ Choose **Local Only**, **Prefer Local**, **Automatic**, **Cloud Only**, or **Ask
 
 The optional **Import GGUF** / **Start Selected Model** flow needs separately obtained weights, an existing compatible `llama-server.exe`, and a matching projector for Vision. Managed startup uses loopback authentication, offline flags and CPU execution. No model catalog, download, runtime distribution, preload or GPU installation occurs automatically. The backend can import inert standalone ONNX data; the UI and managed inference support GGUF. Detected GPU/NPU information does not establish acceleration support.
 
-**Evaluation → Compare AI Models** runs only after confirming saved cases, exact model revisions and potential cloud charges. Automatic routing reuses measured custom-Skill evidence only when the current definition, dataset/revision, configured model revisions and local hardware match, with at least five cases and at most 30 days of age.
+**Automations → Evaluation → Compare AI Models** runs only after confirming saved cases, exact model revisions and potential cloud charges. Automatic routing reuses measured custom-Skill evidence only when the current definition, dataset/revision, configured model revisions and local hardware match, with at least five cases and at most 30 days of age.
 
 For semantic Memory retrieval, configure **Local Embeddings** in AI & Models, then select **Rebuild Memory Search Index** in Settings. Model/runtime/revision/endpoint/dimension identities keep vectors separate. Rebuilds run incrementally in a worker and can be cancelled; Memory semantic queries run in the background, with FTS keyword fallback.
 
@@ -152,4 +154,4 @@ See [Phase 15 implementation/evidence](docs/PHASE15_FINAL_REPORT.md), [architect
 
 ### Demonstration Automation (Phase 17 Beta)
 
-Open **Automation Skills** from the tray or Visual Skills to explicitly teach a selected-window task. Review semantic steps, choose inputs, dry run, approve a verified test and publish an immutable local version. Replays retain Phase16 desktop approvals. Enable Demonstration Automation in Settings → Beta Features. See [Teach Mode](docs/automation/TEACH_MODE.md), [Replay](docs/automation/REPLAY.md) and [verification](docs/PHASE17_FINAL_REPORT.md).
+Open **Automations → Desktop Skills** to explicitly teach a selected-window task. Review semantic steps, choose inputs, dry run, approve a verified test and publish an immutable local version. Replays retain Phase16 desktop approvals. Enable Demonstration Automation in Settings → Help & Diagnostics → Beta Features. See [Teach Mode](docs/automation/TEACH_MODE.md), [Replay](docs/automation/REPLAY.md) and [verification](docs/PHASE17_FINAL_REPORT.md).
