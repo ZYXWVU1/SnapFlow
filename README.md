@@ -1,161 +1,149 @@
 # SnapFlow
 
-Phase 16 adds **Controlled Desktop Actions**, a disabled-by-default beta for reviewed semantic Windows UIA actions through Agent Missions. Exact window fences, action previews, once-only approval, fresh-state verification and uncertain-effect recovery are required. Raw input fallback is unavailable. See [the user guide](docs/USER_GUIDE.md), [architecture](docs/computer_use/ARCHITECTURE.md) and [Phase 16 qualification](docs/PHASE16_FINAL_REPORT.md).
+SnapFlow is a Windows desktop assistant that turns selected screen content into AI answers, structured information, and reusable workflows. Capture a region, ask a question, and review the result before copying, saving, or taking action.
 
-Phase 13 adds local reliability records, crash recovery and Safe Mode, performance timings, local beta features, feedback exports, Health Center, and release gates. The Windows candidate is `0.8.0-beta.2`; actual qualification and remaining blockers are recorded in [the Phase 13 report](docs/PHASE13_IMPLEMENTATION.md).
+The app runs in the system tray and supports cloud AI providers, compatible local models, and optional connections to other services.
 
-Start with [the beta testing guide](docs/BETA_TESTING_GUIDE.md), [privacy and local analytics](docs/PRIVACY_ANALYTICS.md), [recovery guidance](docs/CRASH_RECOVERY.md), [known issues](docs/BETA_KNOWN_ISSUES.md), and [the release process](docs/RELEASE_PROCESS.md). Remote analytics are not implemented. Genuine local model inference and live providers require separate qualification; synthetic checks are identified in the report.
+## Features
 
-SnapFlow is a Windows desktop app for turning a selected part of your screen into an AI answer or structured information. Review the result, then choose whether to copy it, save it, or use it in a workflow.
+- **Capture and ask:** Select part of your screen and ask a question, or choose Smart, Debug, Extract, Explain, or Translate.
+- **Structured extraction:** Turn supported content such as events, assignments, code errors, and tables into fields you can review and export.
+- **Visual Skills:** Use built-in skills or define custom screenshot types, extraction fields, and reusable actions without writing code.
+- **Visual Workflows:** Combine skill matches, conditions, and ordered actions. Review proposed runs and confirm connected-service writes.
+- **Visual Memory:** Save selected results, search them locally, and optionally use retrieved text in AI questions.
+- **Contextual assistance:** Ask follow-up questions using the current analysis, selected memories, and permitted desktop context.
+- **Connected services:** Create Google Calendar events, export events as `.ics` files, append Google Sheets rows, and create Todoist tasks.
+- **MCP extensions:** Connect local stdio or Streamable HTTP servers to use reviewed tools, resources, and prompts. An optional SnapFlow MCP server supports explicitly shared capabilities.
+- **Local and cloud AI:** Choose an OpenAI-compatible cloud provider or local runtime, configure routing, and control cloud fallback.
+- **Data management:** Review saved examples and skill versions, evaluate changes, back up local data, and export sanitized support information.
 
-Capture and provider requests start with a user action. Workflow actions that write to connected services require confirmation.
+## Requirements
 
-## What you can do
+- Windows 10 or 11, x64.
+- Python 3.11 or later when running from source. Packaged builds do not require Python.
+- A vision-capable AI provider or compatible local vision model for screenshot analysis.
 
-- **Capture and ask:** Use the global shortcut to select a screen region. Ask a question or choose Smart, Debug, Extract, Explain, or Translate.
-- **Extract structured information:** Smart mode recognizes supported content such as events, assignments, code errors, and tables. Review the fields before copying or exporting them.
-- **Create Visual Skills:** Use built-in skills or define custom screenshot types, fields, and reusable actions without writing code. Test and edit a skill before enabling it.
-- **Build Visual Workflows:** Combine a skill match, conditions, and ordered actions. Suggest mode lets you review a proposed run. Auto mode still asks you to confirm before actions run.
-- **Connect services:** From a detected Event result, add the event to Google Calendar with one click or save it as an `.ics` file. Workflows can also create Google Calendar events, append Google Sheets rows, or create Todoist tasks.
-- **Connect MCP extensions:** Use local stdio or Streamable HTTP with bearer/OAuth authentication. Review tools, run them in manual Workflows, and select resources/templates/prompts for Context. The optional SnapFlow server uses a local stdio bridge with explicit sharing and native Workflow approval.
-- **Manage examples and data:** Save verified examples when you choose, review skill versions, evaluate changes, back up and restore local data, and export a sanitized support bundle when you request one.
-- **Build Visual Memory:** Choose **Save to Memory** on a structured Skill or Extract result, then search saved information locally from the Memory page. AI Memory Questions are an optional setting and send only retrieved saved text to your provider.
-- **Ask with Context:** After reviewing a screenshot result, ask a follow-up using the current analysis, memories you select, or a separately enabled session-scoped Memory search. Source buttons open the saved records used in the answer.
-- **Check usage and updates:** View token usage and estimated costs when model rates are known. Optional update checks show release information; they do not download or install updates.
-- **Choose where AI runs:** Keep the existing cloud provider, configure a loopback local server, or explicitly start an optional managed GGUF runtime. Private Mode blocks application-owned external traffic; Local Only restricts inference.
-- **Compare models and search Memory locally:** Explicitly compare local/cloud models on a saved dataset, or configure local text embeddings for background Memory indexing and semantic search with keyword fallback.
+Cloud features require an internet connection and provider credentials. Local inference requires a separately configured runtime and model.
 
-## Get started
+## Getting started
 
-SnapFlow targets Windows 10 and 11 on x64. Packaged releases are available as an installer or a complete portable ZIP when provided; packaged users do not need Python.
+If using a packaged build, launch SnapFlow from the installed app or extracted portable folder.
 
-To run from source, install Python 3.11 or later, then open PowerShell in the project folder:
+To run from source, open PowerShell in the project folder:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python main.py
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
 ```
 
-The app starts in the system tray. Choose **Capture Screenshot** or press **Ctrl+Shift+S**, select a region, and review the result. Press **Esc** to cancel a selection. Choose **Quit SnapFlow** from the tray menu to exit.
+Use the first-run setup or **Settings** to configure your AI provider. Then:
+
+1. Press **Ctrl+Shift+S** or choose **Capture Screenshot** from the tray menu.
+2. Select the screen region you want to analyze. Press **Esc** to cancel.
+3. Choose a mode or enter a question.
+4. Review the answer, then copy it, save it to Memory, or choose an available action.
+
+The capture shortcut can be changed in Settings. Choose **Quit SnapFlow** from the tray menu to exit.
 
 To preview screen capture without making a provider request:
 
 ```powershell
-python main.py --preview
+.\.venv\Scripts\python.exe main.py --preview
 ```
 
-The result window keeps Copy, Retry / Ask Again and More in its footer. Use **More → Start Agent Task** for a mission, or **More → Settings** to configure AI.
+## AI configuration
 
-## Configure an AI provider
+Configure the provider endpoint, model, and API key in **Settings**. Saved API keys use Windows Credential Manager.
 
-Use the first-run setup or **Settings** to select a model and provider endpoint. Saved API keys are stored in Windows Credential Manager. For source development, you can instead copy `.env.example` to `.env` and set values there:
+For source development, you can also copy `.env.example` to `.env` and edit its values:
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-| Setting | Purpose |
+| Variable | Purpose |
 | --- | --- |
-| `AI_API_KEY` | API key for your provider |
-| `AI_MODEL` | Vision-capable model name |
+| `AI_API_KEY` | Provider API key |
+| `AI_MODEL` | Vision-capable model identifier |
 | `AI_BASE_URL` | OpenAI-compatible API endpoint |
 | `AI_IMAGE_DETAIL` | Optional image detail setting supported by the provider |
 | `AI_TIMEOUT` | Request timeout in seconds, up to 600 |
 | `AI_MAX_TOKENS` | Maximum response length |
 
-The default endpoint is OpenAI, with `gpt-4.1-mini` as the default model. Other OpenAI-compatible providers must support image input. An `AI_API_KEY` environment value takes precedence over a saved key. Provider and model choices saved in Settings take precedence over `AI_BASE_URL` and `AI_MODEL` from `.env`.
+An `AI_API_KEY` environment value takes precedence over a saved key. Provider and model choices saved in Settings take precedence over `AI_BASE_URL` and `AI_MODEL` from `.env`.
 
-In Cloud Only, requests send selected content to the configured provider and may incur a charge. Testing the cloud connection sends a short text request and may also incur a charge. Existing installations keep Cloud Only; cloud fallback is off by default.
+Cloud requests send selected content to the configured provider and may incur usage charges. Connection tests can also make provider requests.
 
-## Local AI and Private Mode
+### Local models and routing
 
-Open **Settings → AI & Models**. Enter a running OpenAI-compatible loopback endpoint, its model ID, and the actual capabilities/context length. Use **Check Runtime**, **List Server Models**, **Test Text**, **Test Vision**, and **Test JSON** explicitly. Local execution needs no cloud API key; screenshot analysis requires a working Vision model.
+Open **Settings → AI & Models** to configure a running OpenAI-compatible loopback server. Set its model identifier and capabilities, then use the explicit text, vision, and JSON checks to verify support. Screenshot analysis requires a working vision model.
 
-Choose **Local Only**, **Prefer Local**, **Automatic**, **Cloud Only**, or **Ask Every Time**, then save. Prefer Local and Automatic can use cloud only when fallback is enabled and privacy permits it. Private Mode overrides those choices and blocks application-owned external AI, remote integrations/MCP/OAuth and outbound checks. Local Only limits inference while other authorized integrations can still use the network. Loopback servers and approved stdio executables retain their own networking behavior; Private Mode is not a firewall for third-party programs.
+Available routing choices include **Local Only**, **Prefer Local**, **Automatic**, **Cloud Only**, and **Ask Every Time**. Cloud fallback must be enabled before supported local-first routes can use it.
 
-The optional **Import GGUF** / **Start Selected Model** flow needs separately obtained weights, an existing compatible `llama-server.exe`, and a matching projector for Vision. Managed startup uses loopback authentication, offline flags and CPU execution. No model catalog, download, runtime distribution, preload or GPU installation occurs automatically. The backend can import inert standalone ONNX data; the UI and managed inference support GGUF. Detected GPU/NPU information does not establish acceleration support.
+The optional managed GGUF runtime requires separately obtained model weights and a compatible `llama-server.exe`. Vision models also need a matching projector. SnapFlow does not automatically download model weights or install runtimes.
 
-**Automations → Evaluation → Compare AI Models** runs only after confirming saved cases, exact model revisions and potential cloud charges. Automatic routing reuses measured custom-Skill evidence only when the current definition, dataset/revision, configured model revisions and local hardware match, with at least five cases and at most 30 days of age.
+## Optional capabilities
 
-For semantic Memory retrieval, configure **Local Embeddings** in AI & Models, then select **Rebuild Memory Search Index** in Settings. Model/runtime/revision/endpoint/dimension identities keep vectors separate. Rebuilds run incrementally in a worker and can be cancelled; Memory semantic queries run in the background, with FTS keyword fallback.
+### Agent Missions and desktop assistance
 
-Read [local setup](docs/ai/LOCAL_MODELS.md), [Private Mode](docs/ai/PRIVATE_MODE.md), [routing](docs/ai/HYBRID_ROUTING.md), [evaluation and embeddings](docs/ai/MODEL_EVALUATION.md), and the [runtime architecture](docs/ai/AI_RUNTIME_ARCHITECTURE.md).
+Enable **Agent Missions** in Beta Features to turn a goal into a plan you can review and execute. **Plan Only** creates a plan without running its steps. Writes require specific approval.
 
-## Google sign-in configuration
+Desktop Context can supply permitted window metadata, bounded Windows UI Automation content, and selected text. Clipboard access requires explicit consent and is disabled by default.
 
-Google sign-in uses the app's Desktop OAuth client ID. If Google's token endpoint requires the matching client secret, source runs read `SNAPFLOW_GOOGLE_CLIENT_SECRET` from `.env`; Windows bundles include credentials supplied through the build process environment. An existing installation may continue using its saved legacy Google client ID.
+**Controlled Desktop Actions** is an opt-in beta for reviewed semantic Windows UI Automation actions within a selected window. Actions require previews, approval, and verification.
+
+**Demonstration Automation** lets you teach a selected-window task through **Automations → Desktop Skills**. Review the recorded steps, choose inputs, dry run, and approve a test before publishing a local skill version. Enable it in Beta Features before use.
+
+### Browser Companion
+
+The optional Chrome and Edge companion provides read-only current-tab assistance, source review, and sidebar chat through SnapFlow. Configure it under **Settings → Privacy & Permissions → Browser Companion**. It requires the companion extension, Native Messaging host, and an enabled desktop bridge. Browser actions and browser Teach are not available in this preview.
+
+### Service connections
+
+Connect supported services in the app before using their actions. Google sign-in for source runs can use `SNAPFLOW_GOOGLE_CLIENT_ID` and `SNAPFLOW_GOOGLE_CLIENT_SECRET` in `.env` for a Desktop OAuth client.
+
+MCP connections support local stdio and Streamable HTTP, with bearer or OAuth authentication where supported. Review exposed tools and shared context before enabling a connection.
 
 ## Privacy and local data
 
-- Captures are held in memory and are not kept as screenshot history. A screenshot is saved only if you choose to include it with a verified example or Visual Memory record.
-- Visual Memory records live in `%APPDATA%\SnapFlow\learning.sqlite3`; optional images live under `%APPDATA%\SnapFlow\memory\images`. Local keyword search needs no provider connection. AI Memory Questions are off by default.
-- Contextual Assistant sessions start with the current screenshot analysis only. Selecting a Memory or enabling session search sends bounded saved text, not saved images, to the configured provider when you press Ask. Context sessions are temporary and are cleared when the screenshot result closes.
-- Asking a follow-up or retrying may send the retained screenshot to the provider again.
-- SnapFlow does not embed a local OCR engine. The selected local Vision runtime or cloud provider processes images sent with your requests.
-- Saved keys are kept in Windows Credential Manager, not in `config.json` or backup archives. Provider and model settings are non-secret values.
-- Settings and user data are stored under `%APPDATA%\SnapFlow`. The source-only `.env` file stays in the project folder.
-- Imported weights/projectors use `%LOCALAPPDATA%\SnapFlow\models`; optional runtimes use `%LOCALAPPDATA%\SnapFlow\runtimes`. Backups include the small `local_models.json` registry, but exclude weights, runtime binaries and credentials. Restored paths may need re-importing on another computer. Installer uninstall behavior is unchanged; optional local assets require manual cleanup if you want to remove them.
-- AI execution History stores runtime/model identity, timing and reasons without prompts, responses, screenshots or extracted values. Existing saved examples, Memory records and evaluation reports retain their separate save/delete policies.
-- Direct Google Calendar event creation happens only after you click **Add to Google Calendar**. Workflow writes to Google Calendar, Google Sheets, or Todoist happen only after you confirm the action. Imported workflows start disabled in Suggest mode.
+Captures begin with a user action. Screenshots are held in memory and are saved only when you explicitly include them in a verified example or Visual Memory record. Follow-up questions and retries may send the retained screenshot to the selected provider again.
 
-## Keyboard shortcuts
+Settings and user data live under `%APPDATA%\SnapFlow`. Visual Memory uses a local database, and keyword search works without a provider connection. AI Memory Questions are optional and send retrieved saved text to the configured provider.
 
-| Shortcut | Action |
-| --- | --- |
-| Ctrl+Shift+S | Start screen capture |
-| Esc | Cancel screen selection |
+Imported model assets live under `%LOCALAPPDATA%\SnapFlow`. Backups exclude credentials, model weights, and runtime binaries.
 
-Change the capture shortcut in Settings. If another app already uses it, SnapFlow reports the conflict and tray capture remains available.
+**Private Mode** blocks application-owned external traffic, including cloud AI and remote integrations. **Local Only** restricts inference while allowing other authorized integrations to use the network. Third-party runtimes and stdio programs manage their own network access.
 
-## Development checks
+Local reliability records and support exports can help diagnose problems. SnapFlow does not implement remote analytics or automatic crash uploads.
 
-Phase 13 has started with the reliability audit, measured baseline and safe local observability/session foundation. Settings can disable local reliability records; no remote analytics or crash uploads are implemented. See [the Phase 13 journal](docs/PHASE13_IMPLEMENTATION.md) and [event/privacy architecture](docs/OBSERVABILITY.md). Recovery/Safe Mode, performance aggregation, feedback and release gates remain subsequent milestones; this foundation does not establish Beta readiness.
+## Troubleshooting
 
-Run the offline test suite, Python compilation check, and application smoke check from the project folder:
+- **Capture shortcut does not work:** Check for a shortcut conflict in Settings, or capture from the tray menu.
+- **Screenshot analysis fails:** Check the endpoint, credentials, model identifier, and image-input support. For local models, run the vision check in AI & Models.
+- **The app cannot start normally:** Try Safe Mode:
+
+  ```powershell
+  .\.venv\Scripts\python.exe main.py --safe-mode
+  ```
+
+- **A task was interrupted:** Review its recovery status before retrying. Attempted effects are not automatically replayed.
+
+## Development
+
+With dependencies installed, run these checks from the project folder:
 
 ```powershell
-python -m unittest discover -s tests -v
-python -m compileall -q main.py src tests
-python main.py --smoke-test
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m compileall -q main.py src tests
+.\.venv\Scripts\python.exe main.py --smoke-test
 ```
 
 ## Limitations
 
 - Screen selection is limited to one display. Protected content, secure desktops, and some exclusive full-screen applications may not be capturable.
-- AI output can be incomplete or incorrect. Review extracted values and suggested actions before relying on them.
-- Ask, Explain and Translate can display partial answers as they arrive; copying and result actions become available after completion. Structured extraction and Debug wait for a validated complete answer. Providers that explicitly reject streaming can use complete responses. Authorized hybrid routing can make a cloud attempt after local failure or matching quality evidence, but partial output is never silently repeated through another provider. Stop and closing suppress late results and cancel supported transport work; content already sent cannot be retracted.
+- AI output can be incomplete or incorrect. Review extracted information and proposed actions before using them.
+- Local model compatibility and performance depend on the runtime, model, and hardware.
+- Agent Missions, Controlled Desktop Actions, and Demonstration Automation are optional beta capabilities. Browser Companion is a read-only preview.
 - SnapFlow does not start automatically with Windows or install updates automatically.
-- Phase 11 now includes client OAuth/elicitation, notifications/templates, a disabled-by-default SnapFlow server, controlled Workflow preview/execution and trusted SDK interfaces. Source/frozen evidence and remaining release limits are recorded in [the implementation report](docs/PHASE11_IMPLEMENTATION.md). See [client instructions](docs/extensions/MCP_CLIENT.md), [server setup](docs/extensions/MCP_SERVER.md), and [trusted development interfaces](docs/extensions/SNAPFLOW_EXTENSION_SDK.md).
-- Visual Memory now has optional local text embeddings alongside keyword search and optional text-only AI questions. Memory-to-Workflow reuse and retention controls are not added by Phase 12.
-- Phase 12 source functionality does not establish live local VLM, hardware-specific throughput/memory, frozen-build, installer/uninstaller or long-running performance qualification. See [the implementation record](docs/PHASE12_IMPLEMENTATION.md) for evidence and pending release checks.
-
-## Phase 14 Agent beta
-
-Agent Missions adds goal → structured plan → review → guided execution → verified report using existing Context, Memory, Skills, Workflows and reviewed MCP services. Enable **Agent Missions** in Settings → Beta Features, then open **Agent**. Plan Only runs planning without executing steps. Writes start off and always require specific approval. Private Mode and Safe Mode override plans; attempted effects are never automatically replayed after interruption.
-
-Configure new-mission defaults in Edit Settings → Agent. AI routing/fallback continues to follow AI & Models. Read [the Agent user guide](docs/USER_GUIDE.md#agent-missions-phase-14-beta), [architecture](docs/agent/AGENT_ARCHITECTURE.md), and [Phase 14 implementation evidence and qualification limits](docs/PHASE14_IMPLEMENTATION.md). Agent beta is off by default; synthetic checks do not establish live-model/provider or installed-release readiness.
-
-The pinned offline regression runner isolates test modules and denies external socket connections:
-
-```powershell
-.build-venv/Scripts/python.exe scripts/phase14_tests.py
-.build-venv/Scripts/python.exe scripts/verify_phase14.py --source
-.build-venv/Scripts/python.exe scripts/release_check.py --agent
-```
-
-## Phase 15 Desktop Context
-
-Permission-controlled Windows app/window metadata, read-only bounded UI Automation and selected text now feed the existing Context Assistant and Agent. Clipboard requires explicit consent and defaults to disabled. Filtered source preview/removal, temporary Agent plans/results, Private/Safe Mode boundaries and visibly stoppable local Assistance Sessions preserve the existing approval model. No desktop input automation or background screenshot history is introduced.
-
-See [Phase 15 implementation/evidence](docs/PHASE15_FINAL_REPORT.md), [architecture](docs/desktop/DESKTOP_CONTEXT_ARCHITECTURE.md), [privacy](docs/desktop/PRIVACY_MODEL.md) and [Assistance Sessions](docs/desktop/PROACTIVE_ASSISTANCE.md). Qualification status and remaining manual/release gates are recorded in the Phase 15 final report; earlier regression evidence is retained rather than rerun.
-
-### Demonstration Automation (Phase 17 Beta)
-
-Open **Automations → Desktop Skills** to explicitly teach a selected-window task. Review semantic steps, choose inputs, dry run, approve a verified test and publish an immutable local version. Replays retain Phase16 desktop approvals. Enable Demonstration Automation in Settings → Help & Diagnostics → Beta Features. See [Teach Mode](docs/automation/TEACH_MODE.md), [Replay](docs/automation/REPLAY.md) and [verification](docs/PHASE17_FINAL_REPORT.md).
-
-### Browser Companion (Phase 18 read-only preview)
-
-Phase 18 adds a Chrome/Edge MV3 companion, a separate Native Messaging host and an opt-in authenticated desktop bridge. Open **Settings → Privacy & Permissions → Browser Companion**. The read-only candidate supports explicit current-tab assistance, readable source review and browser-sidebar chat through the existing Context engine while SnapFlow stays in the tray. Desktop Ask remains available with clear readiness help and responsive layout. Version 0.3.0 requires protocol-v3 desktop/host and an extension reload. Previous connections are user-confirmed; actual installed v3 context/inference acceptance and installer qualification remain pending. Web actions/Teach await later gates. See [setup](docs/browser/INSTALLATION.md) and [implementation evidence](docs/PHASE18_IMPLEMENTATION.md).
