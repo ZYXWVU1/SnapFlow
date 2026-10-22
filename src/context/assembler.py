@@ -17,6 +17,10 @@ class ContextAssembler:
                              ensure_ascii=False, allow_nan=False)
         sources = [ContextSource('C1', 'current_skill_result', 'Current screenshot analysis',
             current[:self.max_source_chars], screenshot_reference=request.screenshot_reference)]
+        if request.browser_sources:
+            if request.current_skill_result is None:
+                sources = []
+            sources.extend(request.browser_sources)
         desktop = tuple(getattr(request, 'desktop_sources', ()))
         # Selected text outranks structure; current analysis retains its familiar C1 ID.
         sources = [s for s in desktop if s.source_type == 'selected_text'] + sources + [

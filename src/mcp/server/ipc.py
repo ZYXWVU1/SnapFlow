@@ -14,8 +14,12 @@ REQUEST_LIMIT = 65536
 RESPONSE_LIMIT = 524288
 
 
-def _identity(paths):
+def _identity(paths, *, namespace='mcp'):
+    if namespace not in ('mcp', 'browser'):
+        raise ValueError('Unsupported local bridge namespace.')
     digest = hashlib.sha256(str(paths.data_dir.resolve()).casefold().encode()).hexdigest()[:24]
+    if namespace == 'browser':
+        return 'SnapFlowBrowser_' + digest, 'browser_companion_ipc_' + digest
     return 'SnapFlowMCP_' + digest, 'mcp_server_ipc_' + digest
 
 
@@ -41,9 +45,9 @@ def _frame(data, limit):
 class LocalIPCServer(QObject):
     completed = Signal(str, object)
 
-    def __init__(self, paths, credentials, adapter, parent=None):
+    def __init__(self, paths, credentials, adapter, parent=None, *, namespace='mcp'):
         super().__init__(parent)
-        self.name, self.credential_id = _identity(paths)
+        self.name, self.credential_id = _identity(paths, namespace=namespace)
         self.credentials, self.adapter = credentials, adapter
         self.listener = QLocalServer(self)
         self.listener.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
@@ -192,11 +196,12 @@ class LocalIPCServer(QObject):
             pass  # The application has already destroyed its Qt objects.
 
 
-def call_ipc(paths, credentials, operation, arguments, *, token=None, timeout=120, cancel=None):
-    name, credential_id = _identity(paths)
+def call_ipc(paths, credentials, operation, arguments, *, token=None, timeout=120, cancel=None, namespace='mcp'):
+    name, credential_id = _identity(paths, namespace=namespace)
     secret = token if token is not None else credentials.get(credential_id)
     if not secret:
-        raise PermissionError('Enable the MCP server in the running SnapFlow app.')
+        raise PermissionError('Enable Browser Companion in SnapFlow.' if namespace == 'browser'
+                              else 'Enable the MCP server in the running SnapFlow app.')
     socket = QLocalSocket()
     deadline = time.monotonic() + min(timeout, 120)
     buffer = bytearray()
@@ -228,7 +233,8 @@ def call_ipc(paths, credentials, operation, arguments, *, token=None, timeout=12
         socket.setReadBufferSize(RESPONSE_LIMIT + 4)
         socket.connectToServer(name)
         if not socket.waitForConnected(2000):
-            raise ConnectionError('Start SnapFlow and enable its MCP server.')
+            raise ConnectionError('Start SnapFlow and enable Browser Companion.' if namespace == 'browser'
+                                  else 'Start SnapFlow and enable its MCP server.')
         socket.write(_frame({'version': 1, 'token': secret}, REQUEST_LIMIT))
         socket.flush()
         receive()

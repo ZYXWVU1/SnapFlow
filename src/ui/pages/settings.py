@@ -28,6 +28,7 @@ class SettingsPage(ScrollPage):
     beta_insights_requested = Signal()
     report_issue_requested = Signal()
     desktop_actions_requested = Signal()
+    browser_companion_requested = Signal()
 
     def __init__(self, config=None, parent=None, *, paths=None):
         super().__init__(parent)
@@ -79,6 +80,15 @@ class SettingsPage(ScrollPage):
         desktop_button.clicked.connect(self.desktop_actions_requested)
         desktop.content.addWidget(desktop_button)
         self.content.addWidget(desktop)
+        browser = Card()
+        browser.content.addWidget(QLabel('Browser Companion'))
+        browser_note = QLabel('Connect Chrome or Edge to SnapFlow. Page assistance is unavailable in this connection preview.')
+        browser_note.setWordWrap(True)
+        browser.content.addWidget(browser_note)
+        self.browser_companion_button = AppButton('Browser Companion')
+        self.browser_companion_button.clicked.connect(self.browser_companion_requested)
+        browser.content.addWidget(self.browser_companion_button)
+        self.content.addWidget(browser)
         privacy = Card()
         privacy.content.addWidget(QLabel('Privacy'))
         self.privacy_note = QLabel()
@@ -230,7 +240,7 @@ class SettingsPage(ScrollPage):
         self._category_cards = {
             'General': (capture, appearance),
             'AI & Models': (ai,),
-            'Privacy & Permissions': (privacy, context, desktop),
+            'Privacy & Permissions': (privacy, context, desktop, browser),
             'Data & Storage': (data, memory),
             'Help & Diagnostics': (diagnostics,),
             'Usage': (usage,),

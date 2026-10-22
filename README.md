@@ -155,3 +155,7 @@ See [Phase 15 implementation/evidence](docs/PHASE15_FINAL_REPORT.md), [architect
 ### Demonstration Automation (Phase 17 Beta)
 
 Open **Automations → Desktop Skills** to explicitly teach a selected-window task. Review semantic steps, choose inputs, dry run, approve a verified test and publish an immutable local version. Replays retain Phase16 desktop approvals. Enable Demonstration Automation in Settings → Help & Diagnostics → Beta Features. See [Teach Mode](docs/automation/TEACH_MODE.md), [Replay](docs/automation/REPLAY.md) and [verification](docs/PHASE17_FINAL_REPORT.md).
+
+### Browser Companion (Phase 18 read-only preview)
+
+Phase 18 adds a Chrome/Edge MV3 companion, a separate Native Messaging host and an opt-in authenticated desktop bridge. Open **Settings → Privacy & Permissions → Browser Companion**. The read-only candidate supports explicit current-tab assistance, readable source review and browser-sidebar chat through the existing Context engine while SnapFlow stays in the tray. Desktop Ask remains available with clear readiness help and responsive layout. Version 0.3.0 requires protocol-v3 desktop/host and an extension reload. Previous connections are user-confirmed; actual installed v3 context/inference acceptance and installer qualification remain pending. Web actions/Teach await later gates. See [setup](docs/browser/INSTALLATION.md) and [implementation evidence](docs/PHASE18_IMPLEMENTATION.md).

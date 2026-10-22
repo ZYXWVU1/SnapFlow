@@ -426,6 +426,9 @@ class ApplicationController(QObject):
         self.desktop_actions_controller = DesktopActionsController(self)
         from src.ui.automation.controller import AutomationController
         self.automation_controller = AutomationController(self)
+        from src.ui.browser.controller import BrowserCompanionController
+        self.browser_controller = BrowserCompanionController(self)
+        app.aboutToQuit.connect(self.browser_controller.stop)
         self.context_permissions.desktop_validator = self.desktop_controller.service.validate_sources
         self.agent_controller = AgentController(self)
         self.result.agent_requested.connect(self.open_agent)
@@ -500,6 +503,7 @@ class ApplicationController(QObject):
             page.health_center_requested.connect(self.open_health_center)
             page.beta_insights_requested.connect(self.open_beta_insights)
             page.desktop_actions_requested.connect(self.desktop_actions_controller.show_settings)
+            page.browser_companion_requested.connect(self.browser_controller.show)
             self._refresh_settings_beta(page)
             page.set_usage_summary(self.usage_storage.monthly_summary(
                 session_start=self.usage_session_started), self.config.monthly_cost_warning_usd)
@@ -1125,6 +1129,8 @@ class ApplicationController(QObject):
         self.managed_ai_runtime = manager
         self.client.managed_runtime = manager
         self.client.configure(self.config)
+        if getattr(self, 'browser_controller', None):
+            self.browser_controller.refresh_runtime()
         self.configure_semantic_memory()
         page = self.main_window.get_created_page('memory')
         if page is not None:
@@ -1159,6 +1165,8 @@ class ApplicationController(QObject):
     def sync_ai_runtime_preferences(self):
         self.network_policy.set_private_mode(self.config.private_mode)
         self.client.configure(self.config)
+        if getattr(self, 'browser_controller', None):
+            self.browser_controller.refresh_runtime()
         if self.semantic_rebuild_cancel is not None:
             self.semantic_rebuild_cancel.set()
         self.configure_semantic_memory()
@@ -2408,6 +2416,8 @@ class ApplicationController(QObject):
 
     def quit(self) -> None:
         self.quitting = True
+        if getattr(self, 'browser_controller', None):
+            self.browser_controller.stop()
         self.stream_timer.stop()
         for worker in self.workers.values():
             if isinstance(worker, AnalysisWorker):

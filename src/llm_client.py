@@ -149,6 +149,8 @@ class LLMClient:
         return {'skill_id': skill.id, 'definition_snapshot': definition.to_dict() if definition else None}
 
     def _execute(self, request, cloud_executor, *, cloud_model=None, cloud_endpoint=None, validator=None):
+        # Per-request/thread disclosure; never reuse another request's execution.
+        self._request_scope.last_execution = None
         from src.ai.cloud import CloudRuntime
         from src.ai.local import LocalOpenAICompatibleRuntime
         from src.ai.models import ModelCapabilities
@@ -220,6 +222,9 @@ class LLMClient:
                     usage_available=response.usage is not None, local=True))
             if self.routing_callback:
                 self.routing_callback(response, decision)
+            self._request_scope.last_execution = {
+                'route': 'local' if response.local else 'cloud',
+                'model': str(response.model_id or '')[:200]}
             return response.content
         except AnalysisError:
             raise

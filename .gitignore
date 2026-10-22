@@ -52,6 +52,28 @@ result-ui-check.png
 smart-ui-check.png
 phase3-ui-check.png
 
+# Phase 18 source, qualification tests and documentation must be reviewable.
+!/docs/
+/docs/**
+!/docs/PHASE18_IMPLEMENTATION.md
+!/docs/USER_GUIDE.md
+!/docs/browser/
+!/docs/browser/**
+!/tests/
+/tests/*
+!/tests/__init__.py
+!/tests/test_phase18_*.py
+!/packaging/
+/packaging/*
+!/packaging/SnapFlowBrowserHost.spec
+!/packaging/browser_host_entry.py
+!/packaging/canonical_crt.py
+!/scripts/
+/scripts/*
+!/scripts/verify_phase18_host.py
+!/scripts/verify_phase18_dom.py
+!/scripts/verify_phase18_chat_ui.py
+
 # Operating system metadata.
 .DS_Store
 Thumbs.db

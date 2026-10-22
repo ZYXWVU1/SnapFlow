@@ -33,12 +33,18 @@ class ContextSession:
     external_sources: tuple = ()
     external_prompt: str = ''
     desktop_sources: tuple = ()
+    browser_sources: tuple = ()
 
     @classmethod
     def new(cls, screenshot_reference: str):
         if not screenshot_reference:
             raise ValueError('A current screenshot reference is required.')
         return cls(uuid4().hex, screenshot_reference)
+
+    @classmethod
+    def for_browser(cls):
+        """No synthetic screenshot evidence; live browser sources are mandatory."""
+        return cls(uuid4().hex, '')
 
 
 @dataclass(frozen=True)
@@ -57,6 +63,7 @@ class ContextRequest:
     external_sources: tuple = ()
     external_prompt: str = ''
     desktop_sources: tuple = ()
+    browser_sources: tuple = ()
 
     @classmethod
     def new(cls, session: ContextSession, question: str, *, current_skill_result=None,
@@ -67,7 +74,7 @@ class ContextRequest:
             current_skill_result, question, chosen_scope, ids,
             chosen_scope == 'authorized_memory_search', conversation_enabled,
             session.permission_version, _now(), tuple(session.external_sources), session.external_prompt,
-            tuple(session.desktop_sources))
+            tuple(session.desktop_sources), tuple(session.browser_sources))
 
 
 @dataclass(frozen=True)

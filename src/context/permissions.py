@@ -3,8 +3,24 @@ from src.context.models import SCOPES
 
 
 class ContextPermissionService:
-    def __init__(self, desktop_validator=None):
+    def __init__(self, desktop_validator=None, browser_validator=None):
         self.desktop_validator = desktop_validator
+        self.browser_validator = browser_validator
+
+    def select_browser_sources(self, session, sources):
+        from src.context.models import ContextSource
+        sources = tuple(sources)
+        if (len(sources) > 1 or any(not isinstance(source, ContextSource) or source.source_type != 'browser_dom'
+                or not source.connection_id or not source.resource_uri or source.memory_id is not None
+                or source.screenshot_reference is not None or len(source.content) > 3000 for source in sources)):
+            raise ValueError('Select one bounded authorized browser source.')
+        if sources and self.browser_validator is None:
+            raise ValueError('Browser Context requires live authorization validation.')
+        if self.browser_validator:
+            self.browser_validator(sources)
+        session.browser_sources = sources
+        session.permission_version += 1
+        session.history.clear()
 
     def select_desktop_sources(self, session, sources):
         from src.context.models import ContextSource
@@ -71,6 +87,7 @@ class ContextPermissionService:
         session.external_sources = ()
         session.external_prompt = ''
         session.desktop_sources = ()
+        session.browser_sources = ()
 
     def exclude_source(self, session, memory_id):
         if session.scope == 'selected_memories':
@@ -101,6 +118,12 @@ class ContextPermissionService:
         return True
 
     def validate_request(self, session, request):
+        if request.browser_sources and self.browser_validator is None:
+            raise ValueError('Browser Context requires a live validator.')
+        if request.browser_sources != session.browser_sources:
+            raise ValueError('Browser Context selection changed.')
+        if self.browser_validator:
+            self.browser_validator(request.browser_sources)
         if request.desktop_sources and self.desktop_validator is None:
             raise ValueError('Desktop Context requires a live validator.')
         if request.desktop_sources != session.desktop_sources:
@@ -117,7 +140,7 @@ class ContextPermissionService:
             raise ValueError('The requested context scope is not authorized.')
         if not isinstance(request.user_question, str) or not request.user_question.strip() or len(request.user_question) > 500:
             raise ValueError('Enter a question of at most 500 characters.')
-        if not isinstance(request.current_skill_result, dict) or not request.current_skill_result:
+        if (not isinstance(request.current_skill_result, dict) or not request.current_skill_result) and not request.browser_sources:
             raise ValueError('Analyze the current screenshot before asking with context.')
         if request.scope == 'current_only':
             if request.selected_memory_ids or request.retrieval_enabled:
