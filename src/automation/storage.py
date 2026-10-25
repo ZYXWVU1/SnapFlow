@@ -10,7 +10,7 @@ from uuid import uuid4
 from src.agent.models import digest
 from src.beta.flags import require_plain_path
 from src.desktop_actions.models import now
-from .models import AutomationSkill, TargetTemplate
+from .models import AutomationSkill, TargetTemplate, BrowserTargetTemplate
 from .validation import validate_definition
 
 MAX_BYTES = 8 * 1024 * 1024
@@ -49,10 +49,18 @@ class AutomationSkillStore:
             if record['reviewed_hash'] not in (None, content_hash(skill)):
                 raise ValueError('Review evidence does not match the version.')
             evidence = record['test']
-            if evidence is not None and (type(evidence) is not dict or set(evidence) != {'definition_hash', 'tested_at', 'step_count', 'verified', 'target_count'} or
+            evidence_fields = {'definition_hash', 'tested_at', 'step_count', 'verified', 'target_count'}
+            manual_count = sum(not step.executable for step in skill.steps)
+            if skill.domain == 'browser':
+                evidence_fields |= {'domain', 'browser_count', 'manual_count'}
+            if evidence is not None and (type(evidence) is not dict or set(evidence) != evidence_fields or
                     evidence['definition_hash'] != content_hash(skill) or evidence['verified'] is not True or
                     evidence['step_count'] != len(skill.steps) or evidence['target_count'] != len(skill.steps)):
                 raise ValueError('Invalid version test evidence.')
+            if evidence is not None and skill.domain == 'browser' and (evidence['domain'] != 'browser' or
+                    type(evidence['manual_count']) is not int or evidence['manual_count'] != manual_count or
+                    type(evidence['browser_count']) is not int or evidence['browser_count'] != len(skill.steps) - manual_count):
+                raise ValueError('Browser verification and manual acknowledgement must be recorded separately.')
             if record['status'] in ('tested', 'published'):
                 validate_definition(skill, publish=True)
                 if record['reviewed_hash'] != content_hash(skill) or evidence is None:
@@ -96,14 +104,16 @@ class AutomationSkillStore:
     def versions(self, skill_id=None):
         return tuple(self.get(key) for key in self.records if skill_id is None or self.records[key]['definition']['skill_id'] == skill_id)
 
-    def search(self, query='', *, app=None, published_only=False):
+    def search(self, query='', *, app=None, origin=None, published_only=False):
         query = query.strip().casefold()
         result = []
         for skill in self.versions():
-            text = ' '.join((skill.name, skill.description, *skill.supported_apps, *skill.tags, *(i.label for i in skill.inputs)))
+            text = ' '.join((skill.name, skill.description, *skill.supported_apps, *skill.supported_origins, *skill.tags, *(i.label for i in skill.inputs)))
             if query not in text.casefold() or published_only and skill.status != 'published':
                 continue
             if app and app.casefold() not in {p.casefold() for p in skill.supported_apps}:
+                continue
+            if origin and origin not in skill.supported_origins:
                 continue
             result.append(skill)
         return tuple(result)
@@ -142,12 +152,21 @@ class AutomationSkillStore:
             record = self.records[skill.version_id]
             if skill.status not in ('draft', 'tested') or record['reviewed_hash'] != content_hash(run.skill) or content_hash(skill) != content_hash(run.skill):
                 raise ValueError('Review this exact version before testing.')
-            if run.status != 'completed' or len(run.results) != len(skill.steps) or any(not r.get('success') or not r.get('desktop_verified') for r in run.results):
+            def verified(step, result):
+                if not isinstance(result, dict) or result.get('success') is not True:
+                    return False
+                key = 'manual_confirmed' if not step.executable else 'browser_verified' if step.domain == 'browser' else 'desktop_verified'
+                return result.get(key) is True
+            if run.status != 'completed' or len(run.results) != len(skill.steps) or any(not verified(step, result) for step, result in zip(skill.steps, run.results)):
                 raise ValueError('Every required step must execute and verify successfully.')
             if len(previews) != len(skill.steps) or not all(p.allowed for p in previews):
                 raise ValueError('Every target must pass dry-run validation.')
-            self._update(skill.version_id, status='tested', test={'definition_hash': content_hash(skill), 'tested_at': now(),
-                'step_count': len(skill.steps), 'verified': True, 'target_count': len(previews)})
+            evidence = {'definition_hash': content_hash(skill), 'tested_at': now(),
+                'step_count': len(skill.steps), 'verified': True, 'target_count': len(previews)}
+            if skill.domain == 'browser':
+                manual_count = sum(not step.executable for step in skill.steps)
+                evidence.update(domain='browser', browser_count=len(skill.steps) - manual_count, manual_count=manual_count)
+            self._update(skill.version_id, status='tested', test=evidence)
             from src.observability.performance import emit
             emit('automation_skill_tested', component='skill', properties={'step_count': len(skill.steps)})
 
@@ -170,13 +189,18 @@ class AutomationSkillStore:
     restore = create_draft
 
     def repair(self, version_id, step_id, target):
-        if not isinstance(target, TargetTemplate):
+        if not isinstance(target, (TargetTemplate, BrowserTargetTemplate)):
             raise ValueError('Choose a semantic replacement target.')
         original = self.get(version_id)
         from src.observability.performance import emit
         emit('automation_skill_repair_required', component='skill')
         if not any(s.step_id == step_id for s in original.steps):
             raise ValueError('Unknown step.')
+        selected = next(step for step in original.steps if step.step_id == step_id)
+        if isinstance(target, BrowserTargetTemplate) != (selected.domain == 'browser'):
+            raise ValueError('Repair must preserve the automation domain.')
+        if isinstance(target, BrowserTargetTemplate) and target.origin not in original.supported_origins:
+            raise ValueError('Repair cannot expand the website scope.')
         draft = self.create_draft(version_id)
         return self.save_draft(replace(draft, steps=tuple(replace(s, target_template=target,
             preconditions=(), postconditions=tuple(replace(c, target=target) if c.target == s.target_template else c for c in s.postconditions),
@@ -219,7 +243,7 @@ class AutomationSkillStore:
             from .parameters import parameterize, references
             skill = replace(skill, status='draft')
             for index, step in enumerate(skill.steps):
-                if step.action_type == 'set_value' and not references(step.value_template):
+                if step.action_type in ('set_value', 'browser_set_text', 'browser_select_option') and not references(step.value_template):
                     skill = parameterize(skill, step.step_id, 'export_value_' + str(index), 'Value for ' + step.title)
             skill = replace(skill, inputs=tuple(replace(i, default_value=None) for i in skill.inputs))
         return {'format': 'snapauto', 'format_version': 1, 'definition': skill.to_dict()}

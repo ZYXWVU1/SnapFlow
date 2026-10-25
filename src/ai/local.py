@@ -194,7 +194,7 @@ class LocalOpenAICompatibleRuntime:
                 raise ValueError('AI request cancelled.')
             if not response.choices or not isinstance(response.choices[0].message.content, str) or not response.choices[0].message.content.strip():
                 raise ValueError('The local model returned an empty response.')
-            if request.task_type == 'structured_extraction' and response.choices[0].finish_reason == 'length':
+            if (request.task_type == 'structured_extraction' or request.metadata.get('operation') == 'resume_extract') and response.choices[0].finish_reason == 'length':
                 raise ValueError('The local structured response was truncated. Increase the output limit or capture a smaller region.')
             usage = getattr(response, 'usage', None)
             counts = None if usage is None else dict(input_tokens=usage.prompt_tokens, output_tokens=usage.completion_tokens)

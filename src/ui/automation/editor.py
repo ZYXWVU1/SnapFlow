@@ -8,8 +8,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, Q
     QPlainTextEdit, QTabWidget, QWidget, QListWidget, QPushButton, QCheckBox, QComboBox, QDialogButtonBox,
     QInputDialog, QMessageBox)
 
-from src.automation.models import AutomationStepTemplate, ConditionTemplate, TargetTemplate
-from src.automation.parameters import parameterize
+from src.automation.models import AutomationStepTemplate, ConditionTemplate, TargetTemplate, BROWSER_ACTIONS
+from src.automation.parameters import parameterize, references
 from src.desktop_actions.models import ACTIONS, PROPERTIES
 
 
@@ -55,13 +55,23 @@ class AutomationEditor(QDialog):
             button.clicked.connect(callback)
             row.addWidget(button)
         step_layout.addLayout(row)
+        if skill.domain == 'browser':
+            manual = QPushButton('Add Manual Checkpoint')
+            manual.clicked.connect(self.add_manual)
+            step_layout.addWidget(manual)
         self.tabs.addTab(steps, 'Steps')
         self.targets = QPlainTextEdit()
         self.targets.setReadOnly(True)
         self.tabs.addTab(self.targets, 'Targets')
-        permissions = QLabel('Every action: Ask Each Action.\nExternal commits: fresh exact approval on every run.\nProtected/destructive actions: unsupported.\nFallback: structured UI Automation only.\nPrivate Mode and Safe Mode remain authoritative.\nNo cloud demonstration processing or automatic publishing.')
-        permissions.setWordWrap(True)
-        self.tabs.addTab(permissions, 'Permissions')
+        self.permissions = QLabel('Every browser effect: fresh exact approval in the browser sidebar.\n'
+            'Final submissions, sends, purchases and destructive operations remain manual checkpoints.\n'
+            'Scope: ' + ', '.join(skill.supported_origins) + '\n'
+            'Targets use roles and exact accessible names. Private Mode and Safe Mode remain authoritative.\n'
+            'Navigation requires fresh Assist and interaction consent for the destination.' if skill.domain == 'browser' else
+            'Every action: Ask Each Action.\nExternal commits: fresh exact approval on every run.\nProtected/destructive actions: unsupported.\nFallback: structured UI Automation only.\nPrivate Mode and Safe Mode remain authoritative.\nNo cloud demonstration processing or automatic publishing.')
+        self.permissions.setWordWrap(True)
+        self.permissions.setTextFormat(Qt.TextFormat.PlainText)
+        self.tabs.addTab(self.permissions, 'Permissions')
         self.tests = QPlainTextEdit()
         self.tests.setReadOnly(True)
         self.tabs.addTab(self.tests, 'Tests')
@@ -70,6 +80,9 @@ class AutomationEditor(QDialog):
         row = QHBoxLayout()
         for label, callback in (('Save Draft', self.save), ('Confirm Review', self.review),
                 ('Dry Run / Test', self.test), ('Publish Tested Version', self.publish), ('Close', self.accept)):
+            if skill.domain == 'browser' and label == 'Publish Tested Version':
+                layout.addLayout(row)
+                row = QHBoxLayout()
             button = QPushButton(label)
             button.clicked.connect(callback)
             row.addWidget(button)
@@ -83,9 +96,16 @@ class AutomationEditor(QDialog):
             self.steps.addItem(f'{step.title} · {step.action_type} · {step.risk_level} · {step.confidence:.0%} · ' + ('Reviewed' if step.reviewed else 'Needs Review'))
         for spec in self.skill.inputs:
             self.inputs.addItem(spec.label + ' · ' + spec.input_id + ' · ' + spec.value_type + ' · Ask at run time')
-        self.targets.setPlainText('\n\n'.join(s.title + '\n' + s.target_template.process_name + '\n' +
-            str(s.target_template.name_template or '') + '\nAutomation ID: ' + str(s.target_template.automation_id or 'None') +
-            '\nAncestor path: ' + ' / '.join(s.target_template.ancestor_templates) + '\nExpected actions: ' + ', '.join(s.target_template.expected_actions) for s in self.skill.steps))
+        def target_description(step):
+            target = step.target_template
+            if step.domain == 'browser':
+                return (step.title + '\nWebsite: ' + target.origin + '\nRole: ' + target.role +
+                        '\nAccessible name: ' + target.name_template + '\n' +
+                        ('Manual checkpoint' if not step.executable else 'Action: ' + step.action_type))
+            return (step.title + '\n' + target.process_name + '\n' + str(target.name_template or '') +
+                '\nAutomation ID: ' + str(target.automation_id or 'None') + '\nAncestor path: ' +
+                ' / '.join(target.ancestor_templates) + '\nExpected actions: ' + ', '.join(target.expected_actions))
+        self.targets.setPlainText('\n\n'.join(target_description(step) for step in self.skill.steps))
         record = self.controller.store.records.get(self.skill.version_id)
         self.tests.setPlainText('Status: ' + self.skill.status + '\n' +
             ('Verified test: ' + str(record['test']) if record and record['test'] else 'No verified test of this version. Dry run never executes controls. Testing requires approval of each action.'))
@@ -156,10 +176,31 @@ class AutomationEditor(QDialog):
         self._edit_step(self.skill.steps[index], index)
 
     def add(self):
+        if self.skill.domain == 'browser':
+            def chosen(target):
+                action = {'textbox': 'browser_set_text', 'combobox': 'browser_select_option',
+                    'checkbox': 'browser_set_checked', 'document': 'browser_scroll',
+                    'link': 'browser_controlled_navigation'}.get(target.role)
+                if action is None:
+                    raise ValueError('Choose a supported non-sensitive control, or add a manual checkpoint.')
+                value = False if action == 'browser_set_checked' else 0 if action == 'browser_scroll' else target.origin if action == 'browser_controlled_navigation' else ''
+                self._edit_step(AutomationStepTemplate('step_' + uuid4().hex, 'New website step',
+                    action, target, value, risk_level='ui_navigation' if action in ('browser_scroll', 'browser_controlled_navigation') else 'ui_external_edit'), None)
+            self.controller.owner.browser_controller.pick_target(self, chosen)
+            return
         self.controller.pick_target(self, lambda element: self._edit_step(AutomationStepTemplate('step_' + uuid4().hex,
             'New semantic step', element.capabilities.actions[0], TargetTemplate.from_element(element, element.capabilities.actions[0])), None))
 
+    def add_manual(self):
+        if self.skill.domain != 'browser':
+            return
+        self.controller.owner.browser_controller.pick_target(self, lambda target: self._edit_step(
+            AutomationStepTemplate('step_' + uuid4().hex, 'Complete this step manually', 'manual_checkpoint',
+                                   target, risk_level='ui_external_commit'), None), manual=True)
+
     def _edit_step(self, step, index):
+        if step.domain == 'browser':
+            return self._edit_browser_step(step, index)
         dialog = QDialog(self)
         dialog.setWindowTitle('Review Semantic Step')
         form = QFormLayout(dialog)
@@ -236,6 +277,107 @@ class AutomationEditor(QDialog):
             self.skill = replace(self.skill, steps=tuple(steps))
             if variable.text().strip():
                 self.skill = parameterize(self.skill, edited.step_id, variable.text().strip(), title.text().strip())
+            self.refresh()
+        except Exception as exc:
+            self.status.setText(str(exc))
+
+    def _edit_browser_step(self, step, index):
+        dialog = QDialog(self)
+        dialog.setWindowTitle('Review Website Step')
+        form = QFormLayout(dialog)
+        title = QLineEdit(step.title)
+        title.setObjectName('browser_step_title')
+        action = QComboBox()
+        action.setObjectName('browser_action_type')
+        action.addItems((*sorted(BROWSER_ACTIONS), 'manual_checkpoint'))
+        action.setCurrentText(step.action_type)
+        target = [step.target_template]
+        name = QLineEdit(target[0].name_template)
+        name.setObjectName('browser_target_name')
+        scope = QLabel(target[0].origin + ' · ' + target[0].role)
+        scope.setTextFormat(Qt.TextFormat.PlainText)
+        value = QLineEdit(json.dumps(step.to_dict()['value_template'], ensure_ascii=False))
+        value.setObjectName('browser_step_value')
+        value.setMaxLength(4096)
+        variable = QLineEdit()
+        variable.setObjectName('browser_input_id')
+        variable.setPlaceholderText('Optional value input, such as query')
+        reviewed = QCheckBox('I reviewed this exact website, target and step')
+        reviewed.setObjectName('browser_step_reviewed')
+        reviewed.setChecked(step.reviewed)
+        optional = QCheckBox('Optional step')
+        optional.setChecked(step.optional)
+        requested_only = QCheckBox('Verify requested control state only; remove additional state conditions')
+        requested_only.setChecked(not step.preconditions and not step.postconditions)
+        dependencies = QListWidget()
+        from PySide6.QtWidgets import QListWidgetItem
+        for other in self.skill.steps:
+            if other.step_id == step.step_id:
+                continue
+            item = QListWidgetItem(other.title)
+            item.setData(Qt.ItemDataRole.UserRole, other.step_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if other.step_id in step.dependencies else Qt.CheckState.Unchecked)
+            dependencies.addItem(item)
+        select = QPushButton('Choose from reviewed website')
+        def chosen(replacement):
+            if replacement.origin not in self.skill.supported_origins:
+                raise ValueError('A repair cannot expand the declared website scope.')
+            target[0] = replacement
+            name.setText(replacement.name_template)
+            scope.setText(replacement.origin + ' · ' + replacement.role)
+        select.clicked.connect(lambda: self.controller.owner.browser_controller.pick_target(
+            dialog, chosen, manual=action.currentText() == 'manual_checkpoint'))
+        def change_action():
+            manual = action.currentText() == 'manual_checkpoint'
+            value.setEnabled(not manual)
+            variable.setEnabled(action.currentText() in ('browser_set_text', 'browser_select_option', 'browser_set_checked'))
+        action.currentTextChanged.connect(change_action)
+        change_action()
+        for label, widget in (('Title', title), ('Action', action), ('Website / role', scope),
+                ('Exact accessible name', name), ('', select), ('Proposed value (text or JSON scalar)', value),
+                ('Value input identifier', variable), ('Requires earlier steps', dependencies),
+                ('', requested_only), ('', optional), ('', reviewed)):
+            form.addRow(label, widget)
+        warning = QLabel('\n'.join(step.warnings) + '\nFinal submissions remain manual. '
+            'Dry run makes no changes. Additional state conditions pause this browser adapter.')
+        warning.setTextFormat(Qt.TextFormat.PlainText)
+        warning.setWordWrap(True)
+        form.addRow(warning)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            if references(name.text()):
+                raise ValueError('Website targets require a fixed exact accessible name; parameterize the value instead.')
+            self._draft()
+            operation = action.currentText()
+            manual = operation == 'manual_checkpoint'
+            edited = replace(step, title=title.text().strip(), action_type=operation,
+                target_template=replace(target[0], name_template=name.text().strip()),
+                value_template=None if manual else scalar(value.text()),
+                risk_level='ui_external_commit' if manual else 'ui_navigation' if operation in
+                    ('browser_scroll', 'browser_controlled_navigation') else 'ui_external_edit',
+                reviewed=reviewed.isChecked(), optional=optional.isChecked(),
+                preconditions=() if requested_only.isChecked() else step.preconditions,
+                postconditions=() if requested_only.isChecked() else step.postconditions,
+                dependencies=tuple(dependencies.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(dependencies.count()) if dependencies.item(i).checkState() == Qt.CheckState.Checked))
+            steps = list(self.skill.steps)
+            if index is None:
+                edited = replace(edited, dependencies=(steps[-1].step_id,) if steps else ())
+                steps.append(edited)
+            else:
+                steps[index] = edited
+            candidate = replace(self.skill, steps=tuple(steps))
+            if variable.isEnabled() and variable.text().strip():
+                candidate = parameterize(candidate, edited.step_id, variable.text().strip(), title.text().strip())
+            from src.automation.validation import validate_definition
+            validate_definition(candidate)
+            self.skill = candidate
             self.refresh()
         except Exception as exc:
             self.status.setText(str(exc))

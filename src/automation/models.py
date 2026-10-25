@@ -7,6 +7,17 @@ from uuid import uuid4
 from src.agent.models import canonical, digest, snapshot, thaw
 from src.desktop_actions.models import ACTIONS, PROPERTIES, RISKS, DesktopTarget, now
 
+BROWSER_ACTIONS = frozenset(('browser_set_text', 'browser_select_option', 'browser_set_checked',
+    'browser_scroll', 'browser_controlled_navigation'))
+BROWSER_PROPERTIES = frozenset(('value', 'checked', 'selected', 'name', 'scroll'))
+
+
+def browser_origin(value):
+    from src.browser.models import origin
+    origin(value)
+    if any(character in value for character in ('*', '$', '{', '}')):
+        raise ValueError('Browser skills require an exact origin, never a pattern or input reference.')
+
 
 def identifier(value):
     if type(value) is not str or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', value):
@@ -110,13 +121,49 @@ class TargetTemplate(Definition):
 
 
 @dataclass(frozen=True)
+class BrowserTargetTemplate(Definition):
+    """Reusable semantic selector; document identities and grants belong to runtime only."""
+    origin: str
+    role: str
+    name_template: str
+    kind: str = field(default='browser', init=False)
+
+    def __post_init__(self):
+        browser_origin(self.origin)
+        if self.role not in ('textbox', 'combobox', 'checkbox', 'document', 'link', 'button', 'manual'):
+            raise ValueError('Unsupported browser semantic role.')
+        bounded(self.name_template, 160)
+
+    def target(self, bind=lambda value: value):
+        return {'role': self.role, 'name': bind(self.name_template)}
+
+    def spec(self, action_type, value, bind=lambda value: value):
+        from src.browser.action_policy import validate_spec
+        if action_type not in BROWSER_ACTIONS:
+            raise ValueError('Manual checkpoints have no executable operation.')
+        return validate_spec({'action_type': action_type.removeprefix('browser_'),
+            'target': self.target(bind), 'value': bind(value)}, self.origin)
+
+
+def target_template(raw):
+    if not isinstance(raw, Mapping):
+        raise ValueError('A semantic target definition is required.')
+    data = dict(raw)
+    if data.get('kind') == 'browser':
+        data.pop('kind')
+        return BrowserTargetTemplate(**data)
+    return TargetTemplate(**data)
+
+
+@dataclass(frozen=True)
 class ConditionTemplate(Definition):
-    target: TargetTemplate
+    target: TargetTemplate | BrowserTargetTemplate
     property: str
     equals: object
 
     def __post_init__(self):
-        if not isinstance(self.target, TargetTemplate) or self.property not in PROPERTIES:
+        supported = BROWSER_PROPERTIES if isinstance(self.target, BrowserTargetTemplate) else PROPERTIES
+        if not isinstance(self.target, (TargetTemplate, BrowserTargetTemplate)) or self.property not in supported:
             raise ValueError('Invalid verification condition.')
         object.__setattr__(self, 'equals', snapshot(self.equals))
 
@@ -126,7 +173,7 @@ class AutomationStepTemplate(Definition):
     step_id: str
     title: str
     action_type: str
-    target_template: TargetTemplate
+    target_template: TargetTemplate | BrowserTargetTemplate
     value_template: object = None
     preconditions: tuple[ConditionTemplate, ...] = ()
     postconditions: tuple[ConditionTemplate, ...] = ()
@@ -142,17 +189,31 @@ class AutomationStepTemplate(Definition):
     def __post_init__(self):
         identifier(self.step_id)
         bounded(self.title, 200)
-        if self.action_type not in ACTIONS or not isinstance(self.target_template, TargetTemplate):
-            raise ValueError('Only registered semantic desktop actions are supported.')
+        browser = isinstance(self.target_template, BrowserTargetTemplate)
+        supported = (*BROWSER_ACTIONS, 'manual_checkpoint') if browser else ACTIONS
+        if self.action_type not in supported or not isinstance(self.target_template, (TargetTemplate, BrowserTargetTemplate)):
+            raise ValueError('Only registered semantic actions in the target domain are supported.')
+        if self.action_type == 'manual_checkpoint' and self.value_template is not None:
+            raise ValueError('Manual checkpoints cannot retain or execute a value.')
         if self.risk_level not in RISKS or self.approval_mode != 'ask_each_action' or self.fallback_policy != 'structured_only':
-            raise ValueError('A skill cannot weaken desktop approval or fallback policy.')
+            raise ValueError('A skill cannot weaken approval or fallback policy.')
         if any(type(v) is not bool for v in (self.optional, self.reviewed)) or not 0 <= self.confidence <= 1:
             raise ValueError('Invalid step flags or confidence.')
         for key in ('preconditions', 'postconditions', 'dependencies', 'warnings'):
             object.__setattr__(self, key, tuple(getattr(self, key)))
         if any(not isinstance(c, ConditionTemplate) for c in (*self.preconditions, *self.postconditions)) or max(len(self.preconditions), len(self.postconditions)) > 8:
             raise ValueError('Invalid bounded conditions.')
+        if any(isinstance(c.target, BrowserTargetTemplate) != browser for c in (*self.preconditions, *self.postconditions)):
+            raise ValueError('Conditions must use the action target domain.')
         object.__setattr__(self, 'value_template', snapshot(self.value_template))
+
+    @property
+    def domain(self):
+        return 'browser' if isinstance(self.target_template, BrowserTargetTemplate) else 'desktop'
+
+    @property
+    def executable(self):
+        return self.action_type != 'manual_checkpoint'
 
 
 @dataclass(frozen=True)
@@ -171,6 +232,7 @@ class AutomationSkill(Definition):
     tags: tuple[str, ...] = ()
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)
+    supported_origins: tuple[str, ...] = ()
 
     def __post_init__(self):
         identifier(self.skill_id)
@@ -178,7 +240,7 @@ class AutomationSkill(Definition):
         bounded(self.name, 200)
         if type(self.description) is not str or len(self.description) > 2000:
             raise ValueError('Description exceeds the limit.')
-        for key in ('steps', 'inputs', 'preconditions', 'postconditions', 'supported_apps', 'tags'):
+        for key in ('steps', 'inputs', 'preconditions', 'postconditions', 'supported_apps', 'tags', 'supported_origins'):
             object.__setattr__(self, key, tuple(getattr(self, key)))
         if not 1 <= len(self.steps) <= 20 or len(self.inputs) > 32 or len(self.tags) > 20:
             raise ValueError('Skill exceeds supported bounds.')
@@ -197,7 +259,36 @@ class AutomationSkill(Definition):
             bounded(tag, 80)
         if max(len(self.preconditions), len(self.postconditions)) > 8 or any(not isinstance(c, ConditionTemplate) for c in (*self.preconditions, *self.postconditions)):
             raise ValueError('Invalid skill conditions.')
+        if len({step.domain for step in self.steps}) != 1:
+            raise ValueError('A skill must use one automation domain.')
+        if len(self.supported_origins) > 4 or len(set(self.supported_origins)) != len(self.supported_origins):
+            raise ValueError('Choose at most four distinct browser origins.')
+        for value in self.supported_origins:
+            browser_origin(value)
+        conditions = (*self.preconditions, *self.postconditions,
+            *(condition for step in self.steps for condition in (*step.preconditions, *step.postconditions)))
+        if self.domain == 'browser':
+            if self.supported_apps or not self.supported_origins:
+                raise ValueError('Browser skills need explicit origins and no desktop application scope.')
+            if any(not isinstance(c.target, BrowserTargetTemplate) for c in conditions):
+                raise ValueError('Browser skills require browser conditions.')
+            targets = (*[step.target_template for step in self.steps], *[c.target for c in conditions])
+            if any(target.origin not in self.supported_origins for target in targets):
+                raise ValueError('A target is outside the declared website scope.')
+        elif self.supported_origins or any(isinstance(c.target, BrowserTargetTemplate) for c in conditions):
+            raise ValueError('Desktop skills cannot contain browser scope or conditions.')
         canonical(self.to_dict(), limit=262144)
+
+    def to_dict(self):
+        data = plain(self)
+        # Preserve existing definition hashes and review evidence exactly.
+        if not self.supported_origins:
+            data.pop('supported_origins')
+        return data
+
+    @property
+    def domain(self):
+        return self.steps[0].domain
 
     @property
     def risk_summary(self):
@@ -207,12 +298,12 @@ class AutomationSkill(Definition):
     def from_dict(cls, payload):
         data = dict(payload)
         def condition(raw):
-            return ConditionTemplate(TargetTemplate(**raw['target']), raw['property'], raw['equals'])
+            return ConditionTemplate(target_template(raw['target']), raw['property'], raw['equals'])
         data['inputs'] = tuple(AutomationInput(**i) for i in data.get('inputs', ()))
         steps = []
         for raw in data['steps']:
             step = dict(raw)
-            step['target_template'] = TargetTemplate(**step['target_template'])
+            step['target_template'] = target_template(step['target_template'])
             for key in ('preconditions', 'postconditions'):
                 step[key] = tuple(condition(c) for c in step.get(key, ()))
             steps.append(AutomationStepTemplate(**step))

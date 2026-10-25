@@ -98,7 +98,7 @@ Desktop Context can supply permitted window metadata, bounded Windows UI Automat
 
 ### Browser Companion
 
-The optional Chrome and Edge companion provides read-only current-tab assistance, source review, and sidebar chat through SnapFlow. Configure it under **Settings → Privacy & Permissions → Browser Companion**. It requires the companion extension, Native Messaging host, and an enabled desktop bridge. Browser actions and browser Teach are not available in this preview.
+The optional Chrome and Edge companion provides current-tab assistance, source review, and sidebar chat through SnapFlow. Configure it under **Settings → Privacy & Permissions → Browser Companion**. The Gate 3 developer candidate adds separately authorized text edits, dropdowns, checkboxes, scroll and same-site link navigation, with a preview and one-use approval for every change. Final submissions, messages, purchases and destructive actions stay manual. Update the desktop, Native Messaging host and extension together using [Browser Installation](docs/browser/INSTALLATION.md). Web Teach and browser Agent adapters now extend the existing Automation Skills library and Agent registry. Installed acceptance and beta qualification remain open; see [current Phase 18 results](docs/browser/PHASE18_RESULTS.md).
 
 ### Service connections
 
@@ -145,5 +145,5 @@ With dependencies installed, run these checks from the project folder:
 - Screen selection is limited to one display. Protected content, secure desktops, and some exclusive full-screen applications may not be capturable.
 - AI output can be incomplete or incorrect. Review extracted information and proposed actions before using them.
 - Local model compatibility and performance depend on the runtime, model, and hardware.
-- Agent Missions, Controlled Desktop Actions, and Demonstration Automation are optional beta capabilities. Browser Companion is a read-only preview.
+- Agent Missions, Controlled Desktop Actions, and Demonstration Automation are optional beta capabilities. Browser Companion is a developer preview; installed Gate 3 extension acceptance and beta qualification remain pending.
 - SnapFlow does not start automatically with Windows or install updates automatically.

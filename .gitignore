@@ -63,18 +63,46 @@ phase3-ui-check.png
 /tests/*
 !/tests/__init__.py
 !/tests/test_phase18_*.py
+!/tests/test_startup_smoke.py
 !/packaging/
 /packaging/*
 !/packaging/SnapFlowBrowserHost.spec
 !/packaging/browser_host_entry.py
 !/packaging/canonical_crt.py
+!/packaging/SnapFlow.spec
+!/packaging/Phase18Installer.iss
+!/packaging/mcp_entry.py
 !/scripts/
 /scripts/*
 !/scripts/verify_phase18_host.py
 !/scripts/verify_phase18_dom.py
 !/scripts/verify_phase18_chat_ui.py
+!/scripts/verify_phase18_actions.py
+!/scripts/verify_package.py
+!/scripts/verify_phase18_release.py
+!/scripts/verify_phase18_teaching.py
+!/scripts/run_optimization_regression.py
+!/scripts/benchmark_app.py
 
 # Operating system metadata.
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Phase18 installed/CLI acceptance verifiers.
+!/tests/test_resume*.py
+!/scripts/verify_resume_autofill.py
+!/scripts/verify_resume_package.py
+!/scripts/verify_resume_extraction.py
+!/tests/fixtures/
+/tests/fixtures/*
+!/tests/fixtures/resume_extraction/
+!/tests/fixtures/resume_extraction/**
+!/docs/superpowers/
+!/docs/superpowers/plans/
+!/docs/superpowers/plans/2026-10-23-comprehensive-resume-extraction.md
+!/packaging/requirements-build.lock.txt
+!/scripts/verify_phase18_model.py
+!/scripts/verify_phase18_installer.py
+!/scripts/verify_phase18_performance.py
+!/scripts/verify_phase18_extension_e2e.py

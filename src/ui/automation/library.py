@@ -12,9 +12,10 @@ class AutomationLibrary(QDialog):
         self.setWindowTitle('Automation Skills')
         self.resize(900, 560)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel('Reusable desktop procedures · Personal, Productivity, Development, Forms, Settings, Custom\nPublished skills require fresh desktop approval when used by you or Agent.'))
+        layout.addWidget(QLabel('Reusable desktop and website procedures\n'
+            'Website actions require exact approval in the browser sidebar. Final submissions remain manual.'))
         self.search = QLineEdit()
-        self.search.setPlaceholderText('Search names, descriptions, applications, inputs and tags')
+        self.search.setPlaceholderText('Search names, descriptions, applications, websites, inputs and tags')
         self.search.textChanged.connect(self.refresh)
         layout.addWidget(self.search)
         self.list = QListWidget()
@@ -24,8 +25,8 @@ class AutomationLibrary(QDialog):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        for actions in ((('Teach SnapFlow', controller.teach), ('Run', self.run), ('Edit', self.edit), ('Repair Target', self.repair),
-                ('Create Draft / Restore', self.restore), ('Compare Versions', self.compare)),
+        for actions in ((('Teach SnapFlow', controller.teach), ('Teach on a website', controller.teach_web), ('Run', self.run), ('Edit', self.edit)),
+                (('Repair Target', self.repair), ('Create Draft / Restore', self.restore), ('Compare Versions', self.compare)),
                 (('Archive', lambda: self.set_status('archived')), ('Disable', lambda: self.set_status('disabled')),
                 ('Export .snapauto', self.export), ('Import .snapauto', self.import_skill), ('Delete Skill', self.delete))):
             row = QHBoxLayout()
@@ -50,6 +51,7 @@ class AutomationLibrary(QDialog):
             history = [r for r in self.controller.store.usage if r['version_id'] == skill.version_id]
             last = history[-1]['timestamp'] + ' · ' + history[-1]['status'] if history else 'Never'
             self.list.addItem(skill.name + ' · ' + str(len(skill.steps)) + ' steps · Inputs: ' + ', '.join(i.label for i in skill.inputs) +
+                '\n' + ('Website: ' + ', '.join(skill.supported_origins) if skill.domain == 'browser' else 'Application: ' + ', '.join(skill.supported_apps)) +
                 '\n' + skill.status + ' · ' + skill.trust + ' · ' + ', '.join(skill.risk_summary) + ' · Last run: ' + last + '\n' + skill.version_id)
 
     def selected(self):
@@ -90,6 +92,13 @@ class AutomationLibrary(QDialog):
         if not accepted:
             return
         step = skill.steps[labels.index(label)]
+        if skill.domain == 'browser':
+            def browser_chosen(target):
+                draft = self.controller.store.repair(skill.version_id, step.step_id, target)
+                self.controller.edit(draft)
+                self.refresh()
+            self.controller.owner.browser_controller.pick_target(self, browser_chosen, manual=not step.executable)
+            return
         def chosen(element):
             from src.automation.models import TargetTemplate
             draft = self.controller.store.repair(skill.version_id, step.step_id, TargetTemplate.from_element(element, step.action_type))

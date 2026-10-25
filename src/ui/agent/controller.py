@@ -77,6 +77,8 @@ class AgentController(QObject):
         self.page.include_conversation.toggled.connect(self._inputs_changed)
         self.page.include_desktop.toggled.connect(self._inputs_changed)
         self.page.desktop_context_requested.connect(self.owner.desktop_controller.show)
+        self.page.include_browser.toggled.connect(self._inputs_changed)
+        self.page.browser_context_requested.connect(self.owner.browser_controller.show)
         self.page.memory_list.itemChanged.connect(self._inputs_changed)
         for widget in self.page.permissions.values():
             widget.toggled.connect(self._inputs_changed)
@@ -138,7 +140,9 @@ class AgentController(QObject):
             current_image=lambda: self.owner.image_bytes,
             desktop_validator=self.owner.desktop_controller.service.validate_sources,
             desktop_action_provider=self.owner.desktop_actions_controller.provider,
-            automation_provider=self.owner.automation_controller)
+            automation_provider=self.owner.automation_controller,
+            browser_provider=self.owner.browser_controller.agent_provider(),
+            browser_validator=self.owner.browser_controller.validate_agent_sources)
         self.service = AgentMissionService(self.store, self.services, self.owner.execution_journal,
             progress=self.progress_changed.emit)
         self.service.additional_guard = self._guard
@@ -186,6 +190,9 @@ class AgentController(QObject):
         conversation = tuple(context.history) if context else ()
         try:
             desktop = self.owner.desktop_controller.sources() if payload.get('include_desktop') else ()
+            browser = self.owner.browser_controller.agent_sources() if payload.get('include_browser') else ()
+            if payload.get('include_browser') and not browser:
+                raise ValueError('Review and select an authorized page in Browser Companion first.')
         except ValueError as error:
             self.page.show_error(str(error))
             return
@@ -194,7 +201,7 @@ class AgentController(QObject):
         self.view_plan_id = None
         self.page.begin_planning()
         self._start(lambda cancelled: self.service.create(payload, cancelled=cancelled,
-            conversation=conversation, desktop_sources=desktop))
+            conversation=conversation, desktop_sources=desktop, browser_sources=browser))
 
     @Slot(object, object, object)
     def _finished(self, worker, result, error):
@@ -348,6 +355,7 @@ class AgentController(QObject):
             self.page.include_current.setChecked(metadata['include_current'])
             self.page.include_conversation.setChecked(metadata['conversation_included'])
             self.page.include_desktop.setChecked(False)
+            self.page.include_browser.setChecked(False)
         except (ValueError, KeyError):
             # Saved evidence remains readable when live context cannot be restored.
             self.page._selected = set()

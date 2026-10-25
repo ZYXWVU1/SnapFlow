@@ -15,6 +15,9 @@ from .verification import AgentVerifier
 def _returned_outcome(output):
     if not isinstance(output, dict):
         return 'unknown'
+    if 'browser_verified' in output:
+        return 'completed' if (output.get('success') is True and output.get('browser_verified') is True
+            and output.get('status') == 'verified') else 'unknown'
     if 'desktop_verified' in output and output.get('status') in ('verification_failed', 'interrupted'):
         return 'unknown'
     if output.get('success') is False:
@@ -121,6 +124,9 @@ class AgentExecutor:
                             raise ValueError('Mission runtime budget exhausted.')
                         if current.status == 'cancelled' or cancel.is_set():
                             raise ValueError('Mission cancelled.')
+                        if pause.is_set() and (capability.capability_type == 'browser_action' or
+                                capability.source.startswith('browser_automation_skill:')):
+                            raise ValueError('Browser action paused. Review its outcome before resuming.')
                         AgentPlanValidator(self.registry).require(plan, current, private=self.private_provider(), **self.store.validation_context(plan))
                         fresh = self.registry.get(step.capability_id)
                         if fresh is None or fresh.fingerprint != fingerprint or not self.approvals.permits(plan, current, step, inputs):

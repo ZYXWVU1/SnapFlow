@@ -25,6 +25,15 @@ def approval_mode(capability):
     return 'approve_at_execution'
 
 
+def write_verification(capability):
+    """Verification domains are trusted adapter metadata, never model receipts."""
+    if capability.capability_type == 'browser_action' or capability.source.startswith('browser_automation_skill:'):
+        return 'browser_postcondition'
+    if capability.capability_type == 'desktop_action':
+        return 'desktop_postcondition'
+    return 'workflow_status' if capability.capability_type == 'run_workflow' else 'result_exists'
+
+
 def validate_inputs(schema, inputs, *, defer_bindings=False):
     raw = thaw(inputs)
     validator = Draft202012Validator(validate_schema(thaw(schema)))
@@ -83,7 +92,7 @@ class AgentPlanValidator:
             if approval_mode(capability) == 'disabled':
                 errors.append('Unclassified or destructive capability is disabled.')
             if capability.side_effecting and step.verification:
-                required = 'desktop_postcondition' if step.step_type == 'desktop_action' else 'workflow_status' if step.step_type == 'run_workflow' else 'result_exists'
+                required = write_verification(capability)
                 if step.verification.get('method', required) != required or step.verification.get('field', 'resource_id') != 'resource_id':
                     errors.append('Write verification cannot be weakened by the plan.')
             if step.capability_id in policy.forbidden_capabilities:
@@ -97,7 +106,7 @@ class AgentPlanValidator:
                     writes += 1
                 if not policy.allow_external_writes:
                     errors.append('External writes are forbidden by current policy.')
-            if step.step_type == 'desktop_action':
+            if step.step_type in ('desktop_action', 'browser_action'):
                 ui_actions += 1
                 if step.capability_id.startswith('desktop:invoke:') and capability.risk_level == 'external_write':
                     ui_commits += 1

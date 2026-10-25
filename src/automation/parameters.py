@@ -72,9 +72,10 @@ def validate_inputs(schema, values):
 
 def candidates(skill):
     return tuple({'step_id': step.step_id, 'label': step.title, 'value': thaw(step.value_template),
-        'confidence': .9, 'value_type': 'boolean' if step.action_type == 'toggle' else
+        'confidence': .9, 'value_type': 'boolean' if step.action_type in ('toggle', 'browser_set_checked') else
         'number' if step.action_type == 'set_range_value' else 'string'}
-        for step in skill.steps if step.action_type in ('set_value', 'set_range_value', 'toggle') and not references(step.value_template))
+        for step in skill.steps if step.action_type in ('set_value', 'set_range_value', 'toggle',
+            'browser_set_text', 'browser_select_option', 'browser_set_checked') and not references(step.value_template))
 
 
 def parameterize(skill, step_id, input_id, label, *, value_type=None, enum_values=(), target_name=False):
@@ -82,9 +83,12 @@ def parameterize(skill, step_id, input_id, label, *, value_type=None, enum_value
     if any(i.input_id == input_id for i in skill.inputs):
         raise ValueError('Input identifiers must be unique.')
     selected = next((s for s in skill.steps if s.step_id == step_id), None)
-    if selected is None or selected.action_type not in ('set_value', 'set_range_value', 'toggle', 'select'):
+    if selected is None or selected.action_type not in ('set_value', 'set_range_value', 'toggle', 'select',
+            'browser_set_text', 'browser_select_option', 'browser_set_checked'):
         raise ValueError('Choose a value/selection step to parameterize.')
-    value_type = value_type or ('boolean' if selected.action_type == 'toggle' else
+    if selected.domain == 'browser' and target_name:
+        raise ValueError('Browser parameterization changes field values, never the target selector.')
+    value_type = value_type or ('boolean' if selected.action_type in ('toggle', 'browser_set_checked') else
         'number' if selected.action_type == 'set_range_value' else 'enum' if enum_values else 'string')
     spec = AutomationInput(input_id, label, value_type, enum_values=enum_values)
     reference = '${input.' + input_id + '}'

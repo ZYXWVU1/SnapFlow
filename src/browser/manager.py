@@ -20,13 +20,15 @@ class BrowserConnection:
 class BrowserManager:
     LEASE_SECONDS = 45
 
-    def __init__(self, allowed_origins, *, safety_policy=None, clock=time.time, site_permissions=None, changed=lambda: None):
+    def __init__(self, allowed_origins, *, safety_policy=None, clock=time.time, site_permissions=None, changed=lambda: None, journal=None, actions_allowed=lambda: True,
+                 automation_store_provider=lambda: None, teaching_enabled=lambda: False, resume_store_provider=lambda: None):
         self.allowed_origins = frozenset(extension_origin(value) for value in allowed_origins)
         if not self.allowed_origins or len(self.allowed_origins) > 16:
             raise ValueError('Configure explicit approved extension IDs first.')
         self.policy = safety_policy or get_safety_policy()
         self.clock, self.lock = clock, RLock()
         self.enabled = False
+        self.actions_allowed = actions_allowed
         self._connections, self._seen, self._hellos = {}, {}, {}
         from .sessions import BrowserSessionStore
         from .context import BrowserDOMContextProvider
@@ -41,12 +43,25 @@ class BrowserManager:
         from .questions import BrowserQuestionStore
         self.questions = BrowserQuestionStore(self)
         self.question_dispatch = lambda job_id: None
+        from .actions import BrowserActionStore
+        self.actions = BrowserActionStore(self, journal)
+        from .execution import BrowserCommandStore
+        self.commands = BrowserCommandStore(self)
+        from .teaching import BrowserTeachingStore
+        self.teaching = BrowserTeachingStore(self, store_provider=automation_store_provider, enabled=teaching_enabled)
+        from .autofill import BrowserAutofillStore
+        self.autofill = BrowserAutofillStore(self, resume_store_provider)
+        self.resume_dispatch = lambda operation, value: None
 
     def set_question_runtime(self, runtime, dispatch):
         self.questions.runtime = runtime
         self.question_dispatch = dispatch
 
     def _session_revoked(self, session_id):
+        self.actions.cancel_session(session_id)
+        self.commands.revoke(session_id)
+        self.teaching.revoke(session_id)
+        self.autofill.revoke(session_id)
         self.context.drop(session_id)
         self.questions.revoke_session(session_id)
         self.changed()
@@ -81,6 +96,10 @@ class BrowserManager:
             self._seen.clear()
             self._hellos.clear()
             self.session_store.clear()
+            self.actions.clear()
+            self.commands.clear()
+            self.teaching.clear()
+            self.autofill.clear()
             self.questions.clear()
 
     def _prune(self):
@@ -92,6 +111,9 @@ class BrowserManager:
                 self._seen.pop(key, None)
         self._hellos = {key: expiry for key, expiry in self._hellos.items() if expiry > self.clock()}
         self.session_store.prune()
+        self.actions.prune()
+        self.commands.prune()
+        self.autofill.prune()
 
     def connections(self):
         with self.lock:
@@ -101,7 +123,9 @@ class BrowserManager:
     def exchange(self, caller_origin, message):
         # The worker dispatch callback runs after releasing browser authority.
         response, dispatch = self._exchange(caller_origin, message)
-        if dispatch is not None:
+        if isinstance(dispatch, tuple):
+            self.resume_dispatch(*dispatch)
+        elif dispatch is not None:
             self.question_dispatch(dispatch)
         return response
 
@@ -146,6 +170,7 @@ class BrowserManager:
                 self._connections.pop(connection_id)
                 self._seen.pop(connection_id, None)
                 self.session_store.revoke_connection(connection_id)
+                self.actions.prune()
             elif kind == 'authorize':
                 if payload['access_mode'] == 'site' and not self.site_permissions.allowed(caller_origin, payload['identity']['origin']):
                     raise PermissionError('This site has no explicit SnapFlow site preference.')
@@ -155,6 +180,31 @@ class BrowserManager:
             elif kind == 'revoke':
                 self.session_store.revoke_owned(connection_id, session_id)
                 result = {'ok': True, 'kind': 'revoked'}
+            elif kind == 'interact':
+                session = self.session_store.upgrade(connection_id, session_id, payload['identity'])
+                result = {'ok': True, 'kind': 'session', 'session': self.session_store.receipt(session)}
+            elif kind == 'command_poll':
+                result = {'ok': True, 'kind': 'command', 'command':self.commands.poll(connection_id, session_id, payload['identity'])}
+            elif kind == 'command_prepare':
+                result = {'ok': True, 'kind': 'action', 'action':self.commands.prepare(connection_id, session_id, payload)}
+            elif kind == 'resume_request':
+                data = self.autofill.request(connection_id, session_id, payload)
+                result = dict(ok=True, kind='resume', operation=payload['operation'], data=data)
+                if payload['operation'] == 'manage':
+                    dispatch = ('manage', payload['args']['profile_id'] or '')
+                elif payload['operation'] == 'suggest':
+                    dispatch = ('suggest', data['job_id'])
+            elif kind.startswith('teach_'):
+                if kind == 'teach_start':
+                    receipt = self.teaching.start(connection_id, session_id, payload['identity'], payload['title'])
+                else:
+                    operation = {'teach_events':'append','teach_pause':'pause','teach_finish':'finish','teach_discard':'discard'}[kind]
+                    receipt = getattr(self.teaching,operation)(connection_id,session_id,payload)
+                result = {'ok':True,'kind':'teaching','teaching':receipt}
+            elif kind.startswith('action_'):
+                operation = {'action_prepare':'prepare', 'action_claim':'claim', 'action_result':'finish', 'action_cancel':'cancel'}[kind]
+                action = getattr(self.actions, operation)(connection_id, session_id, payload)
+                result = {'ok': True, 'kind': 'action', 'action': action}
             elif kind in ('session_status', 'context_snapshot'):
                 session = self.session_store.require(connection_id, session_id, payload.get('identity'))
                 if kind == 'context_snapshot':

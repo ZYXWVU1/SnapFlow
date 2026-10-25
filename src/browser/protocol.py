@@ -1,4 +1,4 @@
-"""Closed v3 read-only protocol. No page interaction or arbitrary scripting."""
+"""Closed browser protocol. Controlled actions never expose arbitrary scripting."""
 import re
 import time
 from uuid import uuid4
@@ -6,7 +6,7 @@ from uuid import uuid4
 from src.agent.models import canonical, snapshot, thaw
 
 PROTOCOL = 'snapflow-browser'
-VERSION = 3
+VERSION = 6
 MAX_MESSAGE_BYTES = 32768
 HOST_NAME = 'com.snapflow.browser'
 _FIELDS = {'protocol', 'version', 'request_id', 'connection_id', 'session_id', 'type', 'payload', 'expires_at'}
@@ -72,6 +72,28 @@ def validate_envelope(value, *, now=None, response=False):
                 valid = valid and session_id is not None and set(payload) == {'ok', 'kind', 'job'}
                 _question_receipt(payload.get('job'))
                 canonical(payload, limit=16384)
+            elif kind == 'action':
+                valid = valid and session_id is not None and set(payload) == {'ok', 'kind', 'action'}
+                _action_receipt(payload.get('action'))
+            elif kind == 'command':
+                valid = valid and session_id is not None and set(payload) == {'ok','kind','command'}
+                command = payload['command']
+                if command is not None:
+                    from .models import document_identity
+                    from .action_policy import validate_spec
+                    if type(command) is not dict or set(command) != {'command_id','identity','spec','expires_at'}:
+                        raise ValueError('Invalid browser command receipt.')
+                    document_identity(command['identity'])
+                    validate_spec(command['spec'], command['identity']['origin'])
+                    if type(command['command_id']) is not str or not _ID.fullmatch(command['command_id']) or type(command['expires_at']) is not int:
+                        raise ValueError('Invalid browser command identity.')
+            elif kind == 'resume':
+                from .resume_contract import validate_response
+                valid = valid and session_id is not None
+                validate_response(payload)
+            elif kind == 'teaching':
+                valid = valid and session_id is not None and set(payload) == {'ok','kind','teaching'}
+                _teaching_receipt(payload['teaching'])
             elif kind == 'site_policy':
                 valid = valid and set(payload) == {'ok', 'kind', 'origin', 'allowed'} and session_id is None
                 from .models import origin
@@ -83,6 +105,11 @@ def validate_envelope(value, *, now=None, response=False):
                 raise ValueError('Invalid browser success response.')
         elif set(payload) != {'ok', 'code'} or payload['code'] not in ('permission', 'protocol', 'unavailable'):
             raise ValueError('Invalid browser failure response.')
+    elif kind == 'resume_request':
+        from .resume_contract import validate_request
+        if connection is None or session_id is None:
+            raise ValueError('Authorize a page before using resume autofill.')
+        validate_request(payload)
     elif kind == 'hello':
         if (connection is not None or session_id is not None or set(payload) != {'browser_kind', 'extension_version'}
                 or payload['browser_kind'] not in ('chrome', 'edge')
@@ -123,11 +150,50 @@ def validate_envelope(value, *, now=None, response=False):
         elif kind != 'context_preview':
             if type(payload['job_id']) is not str or not _ID.fullmatch(payload['job_id']):
                 raise ValueError('Invalid browser job identity.')
-    elif kind == 'session_status':
+    elif kind in ('session_status', 'interact', 'command_poll'):
         from .models import document_identity
         if connection is None or session_id is None or set(payload) != {'identity'}:
             raise ValueError('Invalid browser session status request.')
         document_identity(payload['identity'])
+    elif kind in ('action_prepare', 'action_claim', 'action_result', 'action_cancel', 'command_prepare'):
+        from .models import document_identity
+        from .action_policy import validate_spec, validate_observation
+        expected = {'identity', 'spec', 'before'} if kind in ('action_prepare','command_prepare') else {'identity', 'action_id'}
+        if kind == 'command_prepare':
+            expected.add('command_id')
+        if kind == 'action_claim':
+            expected.add('fingerprint')
+        if kind == 'action_result':
+            expected.add('status')
+        if connection is None or session_id is None or set(payload) != expected:
+            raise ValueError('Invalid browser action request.')
+        document_identity(payload['identity'])
+        if kind in ('action_prepare', 'command_prepare'):
+            if kind == 'command_prepare' and (type(payload['command_id']) is not str or not _ID.fullmatch(payload['command_id'])):
+                raise ValueError('Invalid command identity.')
+            validate_spec(payload['spec'], payload['identity']['origin'])
+            validate_observation(payload['before'])
+        else:
+            if type(payload['action_id']) is not str or not _ID.fullmatch(payload['action_id']):
+                raise ValueError('Invalid browser action identity.')
+            if kind == 'action_claim' and (type(payload['fingerprint']) is not str or not re.fullmatch('[a-f0-9]{64}', payload['fingerprint'])):
+                raise ValueError('Invalid browser action approval.')
+            if kind == 'action_result' and payload['status'] not in ('verified', 'not_applied', 'unknown'):
+                raise ValueError('Invalid browser action result.')
+    elif kind in ('teach_start','teach_events','teach_pause','teach_finish','teach_discard'):
+        from .models import document_identity, text
+        expected = {'identity','title'} if kind == 'teach_start' else {'identity','trace_id'}
+        if kind == 'teach_events':expected |= {'sequence','events','incomplete'}
+        if connection is None or session_id is None or set(payload) != expected:
+            raise ValueError('Invalid teaching request.')
+        document_identity(payload['identity'])
+        if kind == 'teach_start':text(payload['title'],200)
+        else:
+            if type(payload['trace_id']) is not str or not _ID.fullmatch(payload['trace_id']):
+                raise ValueError('Invalid teaching identity.')
+            if kind == 'teach_events' and (type(payload['sequence']) is not int or not 1 <= payload['sequence'] <= 2**31-1
+                    or type(payload['events']) is not list or len(payload['events']) > 20 or type(payload['incomplete']) is not bool):
+                raise ValueError('Invalid teaching event batch.')
     elif kind == 'revoke':
         if connection is None or session_id is None or payload:
             raise ValueError('Invalid browser session revocation.')
@@ -153,9 +219,40 @@ def _session_receipt(value, session_id):
     if type(value) is not dict or set(value) != {'session_id', 'identity', 'scope', 'access_mode', 'expires_at', 'status'}:
         raise ValueError('Invalid browser session receipt.')
     document_identity(value['identity'])
-    if (value['session_id'] != session_id or value['scope'] != 'read' or value['status'] != 'active'
+    if (value['session_id'] != session_id or value['scope'] not in ('read', 'interact') or value['status'] != 'active'
             or value['access_mode'] not in ('active_tab', 'site') or type(value['expires_at']) is not int):
         raise ValueError('Invalid browser session receipt.')
+
+
+def _action_receipt(value):
+    from .models import document_identity
+    from .action_policy import validate_spec, validate_observation
+    if type(value) is not dict or set(value) != {'action_id', 'identity', 'spec', 'before', 'expires_at', 'status', 'fingerprint'}:
+        raise ValueError('Invalid action receipt.')
+    document_identity(value['identity'])
+    validate_spec(value['spec'], value['identity']['origin'])
+    validate_observation(value['before'])
+    if (type(value['action_id']) is not str or not _ID.fullmatch(value['action_id'])
+            or type(value['fingerprint']) is not str or not re.fullmatch('[a-f0-9]{64}', value['fingerprint'])
+            or type(value['expires_at']) is not int or value['status'] not in ('preview', 'claimed', 'verified', 'not_applied', 'unknown', 'cancelled')):
+        raise ValueError('Invalid action receipt state.')
+
+
+def _teaching_receipt(value):
+    from src.automation.models import identifier
+    fields = {'trace_id','status','event_count','incomplete','sequence','expires_at'}
+    if type(value) is dict and 'version_id' in value:fields.add('version_id')
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError('Invalid teaching receipt.')
+    if (type(value['trace_id']) is not str or not _ID.fullmatch(value['trace_id'])
+            or value['status'] not in ('recording','paused','completed','discarded')
+            or type(value['event_count']) is not int or not 0 <= value['event_count'] <= 20
+            or type(value['sequence']) is not int or not 0 <= value['sequence'] <= 2**31-1
+            or type(value['incomplete']) is not bool or type(value['expires_at']) is not int):
+        raise ValueError('Invalid teaching receipt state.')
+    if 'version_id' in value:
+        identifier(value['version_id'])
+        if value['status'] != 'completed':raise ValueError('Only a finished trace may produce a draft.')
 
 
 def _question_receipt(value):

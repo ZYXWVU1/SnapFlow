@@ -6,53 +6,44 @@ import time
 
 from src.bootstrap import DependencyError, ensure_dependencies, show_dependency_error
 from src.app_version import APP_NAME, APP_VERSION
+from src.startup_smoke import SmokeTests
 
 
 def main() -> int:
+    if len(sys.argv)>1 and sys.argv[1]=='--resume-import-helper':
+        if len(sys.argv)<3 or sys.argv[2] not in ('pdf','docx'):
+            return 2
+        from src.resume.importer import run_import_helper
+        if len(sys.argv)==3:
+            return run_import_helper(sys.argv[2])
+        if len(sys.argv)==4 and sys.argv[3]=='--document':
+            return run_import_helper(sys.argv[2], document=True)
+        if (len(sys.argv)==5 and sys.argv[2:4]==['pdf','--render-page'] and
+                sys.argv[4].isdigit() and len(sys.argv[4])<=2):
+            return run_import_helper('pdf', render_page=int(sys.argv[4]))
+        return 2
+    if '--browser-host-setup' in sys.argv:
+        from src.browser.setup import main as browser_setup_main
+        index = sys.argv.index('--browser-host-setup')
+        try:
+            return browser_setup_main(sys.argv[index + 1:])
+        except (OSError, ValueError) as error:
+            if sys.stderr is not None:
+                print(f'Browser host setup did not complete [{type(error).__name__}]. '
+                      'Existing registrations were preserved.', file=sys.stderr)
+            return 1
     if '--mcp-server-stdio' in sys.argv or (getattr(sys, 'frozen', False) and
             os.path.basename(sys.executable).casefold() == 'snapflowmcp.exe'):
         from src.mcp.server.bridge import main as bridge_main
         return bridge_main()
-    phase10_smoke = ("--phase10-smoke-test" in sys.argv and
-                     os.environ.get("SNAPFLOW_PHASE10_SMOKE") == "1")
-    phase11_smoke = ('--phase11-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE11_SMOKE') == '1')
-    phase13_smoke = ('--phase13-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE13_SMOKE') == '1')
-    phase14_smoke = ('--phase14-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE14_SMOKE') == '1')
-    phase15_smoke = ('--phase15-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE15_SMOKE') == '1')
-    phase16_smoke = ('--phase16-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE16_SMOKE') == '1')
-    phase17_smoke = ('--phase17-smoke-test' in sys.argv and os.environ.get('SNAPFLOW_PHASE17_SMOKE') == '1')
-    if phase17_smoke:
-        from src.automation.packaged_smoke import install_smoke_isolation
-        try:
-            install_smoke_isolation()
-        except (ValueError, OSError):
-            print('Phase 17 smoke requires its disposable profile.', file=sys.stderr)
-            return 1
-    if phase16_smoke:
-        from src.desktop_actions.packaged_smoke import install_smoke_isolation
-        try:
-            install_smoke_isolation()
-        except (ValueError, OSError):
-            print('Phase 16 smoke requires its disposable verification profile.', file=sys.stderr)
-            return 1
-    if phase15_smoke:
-        from src.desktop_context.packaged_smoke import install_smoke_isolation
-        try:
-            install_smoke_isolation()
-        except (ValueError, OSError):
-            print('Phase 15 smoke requires its disposable verification profile.', file=sys.stderr)
-            return 1
-    if phase14_smoke:
-        from src.agent.packaged_smoke import install_smoke_isolation
-        try:
-            install_smoke_isolation()
-        except (ValueError, OSError):
-            print('Phase 14 smoke requires its disposable verification profile.', file=sys.stderr)
-            return 1
+    smoke_tests = SmokeTests()
+    if not smoke_tests.prepare_startup():
+        return 1
+    smoke = smoke_tests.enabled
     try:
         ensure_dependencies()
     except DependencyError as error:
-        if "--smoke-test" in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke:
+        if smoke:
             print(f"Startup smoke failed: {error}", file=sys.stderr)
             return 1
         show_dependency_error(error)
@@ -89,7 +80,7 @@ def main() -> int:
         report = classify_error(error)
         logging.getLogger(__name__).exception(
             "Application startup failed [%s] category=%s", report.reference_id, report.category)
-        if "--smoke-test" in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke:
+        if smoke:
             instance_guard.close()
             print(f"Startup smoke failed [{report.reference_id}]: {report.user_message}", file=sys.stderr)
             return 1
@@ -118,7 +109,6 @@ def main() -> int:
             return 1
 
     app.aboutToQuit.connect(instance_guard.close)
-    smoke = '--smoke-test' in sys.argv or phase10_smoke or phase11_smoke or phase13_smoke or phase14_smoke or phase15_smoke or phase16_smoke or phase17_smoke
     safe_mode = '--safe-mode' in sys.argv
     diagnostics_requested = False
     if not smoke:
@@ -167,29 +157,7 @@ def main() -> int:
     app.aboutToQuit.connect(controller.crash_reporter.uninstall)
     if diagnostics_requested:
         QTimer.singleShot(0, lambda: (controller.main_window.open_page('settings'), controller.main_window.show()))
-    if phase17_smoke:
-        from src.automation.packaged_smoke import run_packaged_automation_smoke
-        QTimer.singleShot(0, lambda: run_packaged_automation_smoke(app, controller))
-    elif phase16_smoke:
-        from src.desktop_actions.packaged_smoke import run_packaged_action_smoke
-        QTimer.singleShot(0, lambda: run_packaged_action_smoke(app, controller))
-    elif phase15_smoke:
-        from src.desktop_context.packaged_smoke import run_packaged_desktop_smoke
-        QTimer.singleShot(0, lambda: run_packaged_desktop_smoke(app, controller))
-    elif phase14_smoke:
-        from src.agent.packaged_smoke import run_packaged_agent_smoke
-        QTimer.singleShot(0, lambda: run_packaged_agent_smoke(app, controller))
-    elif phase13_smoke:
-        from src.reliability.packaged_smoke import run_packaged_reliability_smoke
-        QTimer.singleShot(0, lambda: run_packaged_reliability_smoke(app, controller))
-    elif phase11_smoke:
-        from src.mcp.packaged_smoke import run_packaged_mcp_smoke
-        QTimer.singleShot(0, lambda: run_packaged_mcp_smoke(app, controller))
-    elif phase10_smoke:
-        from src.context.packaged_smoke import run_packaged_context_smoke
-        QTimer.singleShot(0, lambda: run_packaged_context_smoke(app))
-    elif "--smoke-test" in sys.argv:
-        QTimer.singleShot(500, controller.quit)
+    smoke_tests.schedule(app, controller)
     return app.exec()
 
 

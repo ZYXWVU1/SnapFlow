@@ -2112,25 +2112,49 @@ class ApplicationController(QObject):
         self.refresh_ui_state()
 
     def export_backup(self) -> None:
+        from PySide6.QtWidgets import QCheckBox
         self.paths.backup_dir.mkdir(parents=True, exist_ok=True)
         default_name = self.paths.backup_dir / f"SnapFlow-Backup-{datetime.now():%Y-%m-%d}.zip"
-        destination, _ = QFileDialog.getSaveFileName(
+        dialog = QFileDialog(
             self.main_window, "Export SnapFlow Backup", str(default_name), "SnapFlow Backup (*.zip)")
-        if not destination:
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+        dialog.setDefaultSuffix('zip')
+        include_resume = QCheckBox('Include saved resumes and category teaching (personal data)', dialog)
+        include_resume.setChecked(False)
+        include_resume.setToolTip('Includes reviewed facts, source excerpts and category rules. The backup contains readable personal data.')
+        layout = dialog.layout()
+        layout.addWidget(include_resume, layout.rowCount(), 0, 1, layout.columnCount())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        selected = dialog.selectedFiles()
+        if not selected:
+            return
+        destination = selected[0]
         try:
-            result = self.backup_service.export_backup(destination)
+            result = self.backup_service.export_backup(destination, include_resume=include_resume.isChecked())
         except (BackupError, OSError) as exc:
             QMessageBox.warning(self.main_window, "Unable to export backup", str(exc))
             return
         QMessageBox.information(self.main_window, "Backup exported", f"Backup saved to:\n{result}")
 
     def restore_backup(self) -> None:
-        if self.capturing or self.workers or self.workflow_jobs or self.integration_jobs:
+        from src.ui.browser.resume_profile import resume_imports_running
+
+        def active_work():
+            browser = getattr(self, 'browser_controller', None)
+            coordinator = getattr(browser, 'resume_coordinator', None)
+            return (self.capturing or self.workers or self.workflow_jobs or self.integration_jobs or
+                getattr(self, 'context_workers', {}) or resume_imports_running() or
+                getattr(coordinator, 'dialog', None) is not None)
+
+        if active_work():
             QMessageBox.warning(
                 self.main_window,
                 "Finish active work first",
-                "Wait for screenshot analysis, Workflow runs, and integration requests to finish before restoring data.",
+                "Wait for analysis, Workflow runs, integration requests and resume imports to finish, "
+                "and close the resume review dialog before restoring data.",
             )
             return
         source, _ = QFileDialog.getOpenFileName(
@@ -2142,7 +2166,8 @@ class ApplicationController(QObject):
         except BackupError as exc:
             QMessageBox.warning(self.main_window, "Backup could not be validated", str(exc))
             return
-        categories = ", ".join(item.replace("_", " ").title() for item in inspection.categories)
+        categories = ", ".join('Saved resumes and category teaching (personal data)' if item == 'resume'
+            else item.replace("_", " ").title() for item in inspection.categories)
         total_mb = inspection.total_size_bytes / (1024 * 1024)
         answer = QMessageBox.question(
             self.main_window,
@@ -2155,9 +2180,24 @@ class ApplicationController(QObject):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        # Picker/confirmation dialogs run nested Qt event loops: recheck work
+        # immediately before stopping services or replacing any database file.
+        if active_work():
+            QMessageBox.warning(self.main_window, 'Finish active work first',
+                'New work started during confirmation. Finish it and close resume review before restoring data.')
+            return
         try:
+            browser = getattr(self, 'browser_controller', None)
+            if browser is not None:
+                browser.stop()
+                store = getattr(browser, 'resume_store', None)
+                if store is not None:
+                    store.close()
+                # Both successful restore and rollback must reopen the current
+                # file through the provider instead of retaining old handles.
+                browser.resume_store = None
             result = self.backup_service.restore_backup(source)
-        except BackupError as exc:
+        except (BackupError, OSError, sqlite3.Error) as exc:
             QMessageBox.critical(self.main_window, "Restore failed", str(exc))
             return
         QMessageBox.information(
@@ -2416,6 +2456,8 @@ class ApplicationController(QObject):
 
     def quit(self) -> None:
         self.quitting = True
+        from src.ui.browser.resume_profile import cancel_resume_imports
+        cancel_resume_imports()
         if getattr(self, 'browser_controller', None):
             self.browser_controller.stop()
         self.stream_timer.stop()
@@ -2461,6 +2503,10 @@ class ApplicationController(QObject):
             self.finish_quit()
 
     def finish_quit(self) -> None:
+        from src.ui.browser.resume_profile import resume_imports_running
+        if resume_imports_running():
+            QTimer.singleShot(50, self.finish_quit)
+            return
         if getattr(self, 'desktop_actions_controller', None) and self.desktop_actions_controller.worker:
             QTimer.singleShot(50, self.finish_quit)
             return

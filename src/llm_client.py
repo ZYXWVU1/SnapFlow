@@ -38,6 +38,14 @@ def _positive_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(value, maximum))
 
 
+def _output_budget(value):
+    if value is None:
+        return _positive_int('AI_MAX_TOKENS', 1024, 128, 8192)
+    if type(value) is not int or not 128 <= value <= 8192:
+        raise ValueError('Output budget must be an integer from 128 to 8192 tokens.')
+    return value
+
+
 def _request_timeout(base_url: str) -> float:
     default = 120.0 if "siliconflow.cn" in base_url.lower() else 45.0
     try:
@@ -290,27 +298,30 @@ class LLMClient:
     def request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
                      base_url=None, model=None, usage_operation=None,
                      system_prompt=None, privacy_requirement='standard', validator=None,
-                     runtime_choice=None, metadata=None, cancelled=None) -> str:
+                     runtime_choice=None, metadata=None, cancelled=None,
+                     response_schema=None, max_output_tokens=None) -> str:
         from src.ai.models import AIRequest
         from src.observability.performance import emit
         prepared = time.perf_counter()
-        request = AIRequest(prompt=prompt, task_type='contextual_reasoning' if mode == 'context' else 'text',
+        request = AIRequest(prompt=prompt, task_type='structured_extraction' if response_schema or usage_operation == 'resume_extract' else 'contextual_reasoning' if mode == 'context' else 'text',
+            response_schema=response_schema,
             timeout_seconds=self._timeout_seconds(base_url),
             cancelled=cancelled or getattr(self._request_scope, 'cancelled', None),
             preferred_model=model, privacy_requirement=privacy_requirement,
             metadata={**(metadata or {}), **dict(mode=mode, system_prompt=system_prompt, operation=usage_operation or 'text',
-                          max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192), runtime_choice=runtime_choice)})
+                          max_tokens=_output_budget(max_output_tokens), runtime_choice=runtime_choice)})
         emit('operation_completed', component='ai_router', duration_ms=(time.perf_counter() - prepared) * 1000,
              success=True, properties={'operation': 'request_prepare'})
         return self._execute(request, lambda req: self._cloud_request_text(req.prompt, mode,
             api_key=api_key, base_url=req.metadata['cloud_base_url'], model=req.preferred_model, usage_operation=usage_operation,
             system_prompt=system_prompt, cancelled=req.cancelled, timeout_seconds=req.remaining_timeout,
-            deadline=req.deadline), cloud_model=model, cloud_endpoint=base_url, validator=validator)
+            deadline=req.deadline, max_output_tokens=req.metadata['max_tokens']), cloud_model=model, cloud_endpoint=base_url, validator=validator)
 
     def request_image(self, image_bytes: bytes, prompt: str, mode: str = '',
                       custom_prompt=None, history=None, model_override=None, usage_operation=None,
                       *, response_schema=None, validator=None, privacy_requirement='standard',
-                      runtime_choice=None, metadata=None, cancelled=None, on_delta=None) -> str:
+                      runtime_choice=None, metadata=None, cancelled=None, on_delta=None,
+                      max_output_tokens=None) -> str:
         from src.ai.models import AIRequest
         from src.observability.performance import emit
         prepared = time.perf_counter()
@@ -324,7 +335,7 @@ class LLMClient:
             image_bytes=image_bytes, conversation=history or (), response_schema=response_schema,
             preferred_model=model_override, privacy_requirement=privacy_requirement,
             metadata={**(metadata or {}), **dict(mode=mode, custom_prompt=custom_prompt, operation=usage_operation or mode or 'image',
-                          max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192), runtime_choice=runtime_choice,
+                          max_tokens=_output_budget(max_output_tokens), runtime_choice=runtime_choice,
                           cloud_max_image_width=self.config.max_image_width)})
         emit('operation_completed', component='ai_router', duration_ms=(time.perf_counter() - prepared) * 1000,
              success=True, properties={'operation': 'request_prepare'})
@@ -333,7 +344,8 @@ class LLMClient:
             base_url=req.metadata['cloud_base_url'],
             timeout_seconds=req.remaining_timeout,
             deadline=req.deadline,
-            image_encoding=req.metadata.get('image_encoding', 'png'), stream=req.stream), cloud_model=model_override, validator=validator)
+            image_encoding=req.metadata.get('image_encoding', 'png'), stream=req.stream,
+            max_output_tokens=req.metadata['max_tokens']), cloud_model=model_override, validator=validator)
 
     def _record_usage(self, response, *, model, base_url, operation, started=None, failure=None):
         if self.usage_callback is None:
@@ -373,7 +385,8 @@ class LLMClient:
 
     def _cloud_request_text(self, prompt: str, mode: str = 'optimizer', *, api_key=None,
                      base_url=None, model=None, usage_operation=None,
-                     system_prompt=None, cancelled=None, timeout_seconds=None, deadline=None) -> str:
+                     system_prompt=None, cancelled=None, timeout_seconds=None, deadline=None,
+                     max_output_tokens=None) -> str:
         """Use the configured provider for an explicit text-only Skill proposal."""
         from openai import APIConnectionError, APIStatusError, APITimeoutError
         key = (os.getenv('AI_API_KEY', '') if api_key is None else api_key).strip()
@@ -394,11 +407,14 @@ class LLMClient:
                     _request_timeout(base_url) if timeout_seconds is None else timeout_seconds, cancelled, deadline) as client:
                 response = client.chat.completions.create(model=model,
                     messages=messages,
-                    max_tokens=_positive_int('AI_MAX_TOKENS', 1024, 128, 8192))
+                    max_tokens=_output_budget(max_output_tokens))
             self._record_usage(response, model=model, base_url=base_url,
                                operation=usage_operation or 'text', started=started)
             if not response.choices or not response.choices[0].message.content:
                 raise AnalysisError('The AI service returned an empty proposal.')
+            if (usage_operation == 'resume_extract' and
+                    getattr(response.choices[0], 'finish_reason', None) == 'length'):
+                raise AnalysisError('The resume response was truncated by the output limit. Extract a smaller section.')
             return response.choices[0].message.content.strip()
         except APITimeoutError as exc:
             self._record_usage(None, model=model, base_url=base_url,
@@ -444,7 +460,7 @@ class LLMClient:
                       history: list[dict[str, str]] | None = None,
                       model_override: str | None = None,
                       usage_operation: str | None = None, *, cancelled=None, image_encoding='png', base_url=None,
-                      timeout_seconds=None, deadline=None, stream=None) -> str:
+                      timeout_seconds=None, deadline=None, stream=None, max_output_tokens=None) -> str:
         """Shared vision transport for workflow and standalone classification prompts."""
         from openai import APIConnectionError, APIStatusError, APITimeoutError
         key = os.getenv("AI_API_KEY", "").strip()
@@ -488,7 +504,7 @@ class LLMClient:
                 request = {
                     "model": model,
                     "messages": messages,
-                    "max_tokens": _positive_int("AI_MAX_TOKENS", 1024, 128, 8192),
+                    "max_tokens": _output_budget(max_output_tokens),
                 }
                 if is_siliconflow:
                     thinking = os.getenv("AI_ENABLE_THINKING", "").strip().lower()
@@ -501,7 +517,7 @@ class LLMClient:
                     guard=lambda: self.policy.require_allowed(base_url, 'cloud_ai'))
             if not response.choices:
                 raise AnalysisError("The AI service returned no answer. Please try again.")
-            if mode in ('extract', 'debug', 'ocr', 'skill') and getattr(response.choices[0], 'finish_reason', None) == 'length':
+            if (mode in ('extract', 'debug', 'ocr', 'skill') or usage_operation == 'resume_extract') and getattr(response.choices[0], 'finish_reason', None) == 'length':
                 raise AnalysisError(
                     'The AI response was cut off by the output token limit. '
                     'Capture a smaller region or increase AI_MAX_TOKENS in .env (for example, 4096), then restart the app.'

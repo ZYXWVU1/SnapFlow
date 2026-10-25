@@ -164,6 +164,11 @@ class AppPaths:
         return self.data_dir / 'agent_missions.sqlite3'
 
     @property
+    def resume_database(self):
+        """Explicitly reviewed personal data; separate from browsing and memory."""
+        return self.data_dir / 'databases' / 'resume_autofill.sqlite3'
+
+    @property
     def verified_images_dir(self):
         return self.data_dir / "verified_images"
 

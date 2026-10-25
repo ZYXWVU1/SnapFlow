@@ -49,6 +49,13 @@ class BrowserSessionStore:
         return {'tab_id': session.tab_id, 'frame_id': session.frame_id,
                 'document_id': session.document_id, 'origin': session.origin}
 
+    def upgrade(self, connection_id, session_id, identity):
+        session = self.require(connection_id, session_id, identity)
+        # No silent renewal: repeated interaction clicks cannot extend the grant.
+        session = replace(session, authorized_scope='interact', expires_at=min(session.expires_at, self.clock() + 120))
+        self._sessions[session_id] = session
+        return session
+
     def revoke(self, session_id):
         if self._sessions.pop(session_id, None) is not None:
             self.on_revoke(session_id)
@@ -70,5 +77,5 @@ class BrowserSessionStore:
             self.revoke(session_id)
 
     def receipt(self, session):
-        return {'session_id': session.session_id, 'identity': self.identity(session), 'scope': 'read',
+        return {'session_id': session.session_id, 'identity': self.identity(session), 'scope': session.authorized_scope,
                 'access_mode': session.access_mode, 'expires_at': int(session.expires_at * 1000), 'status': 'active'}

@@ -1,4 +1,4 @@
-"""Desktop-derived plans/outputs stay in RAM; durable history holds safe receipts."""
+"""Desktop/browser-derived plans stay in RAM; durable history holds safe receipts."""
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
@@ -29,8 +29,8 @@ class DesktopAwareAgentStore(AgentStore):
         return self._opaque_id(plan.session_id, step_id)
 
     def _skeleton(self, plan):
-        return replace(plan, goal_summary='Temporary desktop plan (contents released on Clear/Stop)',
-            assumptions=(), warnings=('Original desktop-derived plan is available only until context is cleared.',),
+        return replace(plan, goal_summary='Temporary context plan (contents released on Clear/Stop)',
+            assumptions=(), warnings=('Original live-context plan is available only until context is cleared.',),
             steps=tuple(replace(step, step_id=self._opaque_id(plan.session_id, step.step_id),
                 dependencies=tuple(self._opaque_id(plan.session_id, sid) for sid in step.dependencies),
                 title='Temporary step ' + str(step.order), description='',
@@ -39,7 +39,7 @@ class DesktopAwareAgentStore(AgentStore):
     def add_plan(self, plan):
         with self.lock:
             if plan.session_id in self.released_sessions:
-                raise ValueError('Desktop Context was cleared. Create a new mission.')
+                raise ValueError('Temporary Context was cleared. Create a new mission.')
             temporary = plan.session_id in self.temporary_sessions
             super().add_plan(self._skeleton(plan) if temporary else plan)
             if temporary:
@@ -83,8 +83,12 @@ class DesktopAwareAgentStore(AgentStore):
                         'permission_denied', 'stale_target', 'target_not_found', 'target_ambiguous'):
                     safe_output['desktop_verified'] = output['desktop_verified']
                     safe_output['status'] = output['status']
+                if type(output.get('browser_verified')) is bool and output.get('status') in (
+                        'verified', 'unknown', 'cancelled', 'expired'):
+                    safe_output['browser_verified'] = output['browser_verified']
+                    safe_output['status'] = output['status']
             safe_evidence = {'verified': evidence.get('verified') is True,
-                'method': 'temporary_desktop_output', 'warnings': ['Desktop-derived details are temporary.']} if evidence else None
+                'method': 'temporary_context_output', 'warnings': ['Live-context details are temporary.']} if evidence else None
             super().set_step(plan_id, durable_id, status, output=safe_output, evidence=safe_evidence, invocation=invocation)
 
     def step_states(self, plan_id):
@@ -133,3 +137,11 @@ class DesktopAwareAgentStore(AgentStore):
     def delete_session(self, session_id):
         super().delete_session(session_id)
         self.clear_temporary(session_id)
+
+    def export_session(self, session_id):
+        if session_id not in self.temporary_sessions:
+            return super().export_session(session_id)
+        # Export is a disk boundary too; never export the live RAM cache.
+        return {'version': 1, 'session': self.get_session(session_id).to_dict(),
+            'plans': [{'plan': plan.to_dict(), 'steps': AgentStore.step_states(self, plan.plan_id)}
+                for plan in AgentStore.plans(self, session_id)]}

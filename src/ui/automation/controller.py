@@ -56,6 +56,14 @@ class AutomationController(QObject):
         self.teach_dialog.finished.connect(lambda _: setattr(self, 'teach_dialog', None))
         self.teach_dialog.show()
 
+    def teach_web(self):
+        if not self.enabled():
+            raise PermissionError('Enable Demonstration Automation outside Safe Mode before teaching a website.')
+        self.owner.browser_controller.show()
+        if self.library:
+            self.library.status.setText('Assist the website, open its browser sidebar, then choose Start Teaching. '
+                                        'Review and save the resulting draft in this library.')
+
     def _teaching_changed(self, active):
         if self.teach_action:
             self.teach_action.setText('Teaching Active · Show Controls…' if active else 'Teach SnapFlow…')
@@ -85,13 +93,21 @@ class AutomationController(QObject):
 
     def run_skill(self, skill, *, testing=False):
         self.ensure()
-        self.runtime._guard()
+        if skill.domain == 'browser':
+            if not self.enabled():
+                raise PermissionError('Enable Demonstration Automation outside Safe Mode before running a website procedure.')
+        else:
+            self.runtime._guard()
         if self.run_dialog or self.owner.agent_controller.busy:
             raise ValueError('Stop the current procedure or Agent mission before starting another run.')
         if testing and self.store.records[skill.version_id]['reviewed_hash'] is None:
             raise ValueError('Confirm review of this exact version before testing.')
-        from .run import AutomationRunDialog
-        self.run_dialog = AutomationRunDialog(self, skill, testing=testing)
+        if skill.domain == 'browser':
+            from src.ui.browser.web_run import WebAutomationRunDialog
+            self.run_dialog = WebAutomationRunDialog(self, skill, testing=testing)
+        else:
+            from .run import AutomationRunDialog
+            self.run_dialog = AutomationRunDialog(self, skill, testing=testing)
         try:
             self.run_dialog.exec()
         finally:

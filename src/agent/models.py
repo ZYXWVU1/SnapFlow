@@ -15,7 +15,7 @@ STEP_STATUSES = ('pending', 'ready', 'awaiting_approval', 'running', 'success', 
                  'skipped', 'blocked', 'cancelled', 'interrupted', 'verification_failed')
 STEP_TYPES = ('reason', 'retrieve_memory', 'read_context', 'run_skill', 'run_workflow',
               'call_action', 'call_mcp_tool', 'generate_text', 'compare_data', 'verify_result',
-              'request_user_input', 'save_to_memory', 'desktop_action')
+              'request_user_input', 'save_to_memory', 'desktop_action', 'browser_action')
 RISKS = ('read_only', 'local_write', 'external_write', 'sensitive', 'destructive', 'unknown')
 APPROVAL_MODES = ('automatic_safe', 'approve_once', 'approve_at_execution', 'disabled')
 

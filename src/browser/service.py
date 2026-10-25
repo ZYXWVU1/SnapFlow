@@ -10,11 +10,16 @@ class BrowserCompanionService(QObject):
     changed = Signal()
     backend_changed = Signal()
     question_requested = Signal(str)
+    resume_requested = Signal(str, str)
 
-    def __init__(self, paths, credentials, parent=None, *, safety_policy=None):
+    def __init__(self, paths, credentials, parent=None, *, safety_policy=None, journal=None, actions_allowed=lambda: True,
+                 automation_store_provider=lambda: None, teaching_enabled=lambda: False, resume_store_provider=lambda: None):
         super().__init__(parent)
         self.paths, self.credentials = paths, credentials
         self.policy = safety_policy or get_safety_policy()
+        self.journal, self.actions_allowed = journal, actions_allowed
+        self.automation_store_provider, self.teaching_enabled = automation_store_provider, teaching_enabled
+        self.resume_store_provider = resume_store_provider
         self.manager = self.ipc = None
         self.warning = ''
         self.question_runtime = None
@@ -33,7 +38,10 @@ class BrowserCompanionService(QObject):
         from .permissions import BrowserSitePermissions
         manager = BrowserManager(allowed_origins, safety_policy=self.policy,
             site_permissions=BrowserSitePermissions(self.paths.data_dir / 'browser_site_permissions.json'),
-            changed=self.backend_changed.emit)
+            changed=self.backend_changed.emit, journal=self.journal, actions_allowed=self.actions_allowed,
+            automation_store_provider=self.automation_store_provider, teaching_enabled=self.teaching_enabled,
+            resume_store_provider=self.resume_store_provider)
+        manager.resume_dispatch = self.resume_requested.emit
         if self.question_runtime:
             manager.set_question_runtime(self.question_runtime, self.question_requested.emit)
         self.close()

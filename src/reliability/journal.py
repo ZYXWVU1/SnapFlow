@@ -104,6 +104,13 @@ class ExecutionJournal:
 
     def claim_desktop(self, invocation):
         """Opaque action identity; UNIQUE prevents replay even across process restarts."""
+        return self._claim_action(invocation, 'desktop_write')
+
+    def claim_browser(self, invocation):
+        """Browser claims contain no page data and cannot be replayed after restart."""
+        return self._claim_action(invocation, 'browser_write')
+
+    def _claim_action(self, invocation, component):
         import re
         if not isinstance(invocation, str) or not re.fullmatch('[a-f0-9]{32}', invocation):
             raise ValueError('Invalid desktop invocation identity.')
@@ -112,7 +119,7 @@ class ExecutionJournal:
             if db.execute("SELECT count(*) FROM execution_journal WHERE status NOT IN ('completed','failed','reviewed')").fetchone()[0] >= 1024:
                 raise RuntimeError('Review interrupted actions before starting more writes.')
             db.execute('INSERT INTO execution_journal (invocation_id,owner_id,component,status,planned_at) '
-                       "VALUES (?,?,?,'planned',?)", (invocation, self.owner_id, 'desktop_write', now()))
+                       "VALUES (?,?,?,'planned',?)", (invocation, self.owner_id, component, now()))
         return invocation
 
     def checkpoint_desktop(self, invocation, status):

@@ -10,7 +10,7 @@ from src.context.retrieval import ContextRetrievalService
 
 def assemble_agent_context(memory_store, current_result, screenshot_reference, goal,
         selected_memory_ids=(), allow_search=False, conversation_history=(), external_sources=(), *, include_current=True,
-        desktop_sources=(), desktop_validator=None):
+        desktop_sources=(), desktop_validator=None, browser_sources=(), browser_validator=None):
     if type(allow_search) is not bool:
         raise ValueError('Memory search must be explicitly authorized.')
     if type(include_current) is not bool:
@@ -19,7 +19,7 @@ def assemble_agent_context(memory_store, current_result, screenshot_reference, g
         current_result = {'context_status': 'No current screenshot selected.'}
         screenshot_reference = 'agent-no-capture'
     session = ContextSession.new(screenshot_reference)
-    permissions = ContextPermissionService(desktop_validator)
+    permissions = ContextPermissionService(desktop_validator, browser_validator)
     selected_memory_ids = tuple(selected_memory_ids)
     if selected_memory_ids and allow_search:
         raise ValueError('Choose selected memories or authorized search.')
@@ -33,6 +33,10 @@ def assemble_agent_context(memory_store, current_result, screenshot_reference, g
         if desktop_validator is None:
             raise ValueError('Desktop Context requires a live permission validator.')
         permissions.select_desktop_sources(session, desktop_sources)
+    if browser_sources:
+        if browser_validator is None:
+            raise ValueError('Browser Context requires a live permission validator.')
+        permissions.select_browser_sources(session, browser_sources)
     request = ContextRequest.new(session, goal, current_skill_result=current_result,
         conversation_enabled=bool(conversation_history))
     permissions.validate_request(session, request)

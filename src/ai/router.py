@@ -68,6 +68,13 @@ class AIRuntimeRouter:
         private = self.policy.private_mode or self.config.private_mode or request.privacy_requirement == 'private'
         local_only = private or self.config.ai_execution_mode == 'local_only' or request.privacy_requirement == 'local_only'
         mode = 'local_only' if local_only else self.config.ai_execution_mode
+        if request.metadata.get('operation') in ('resume_extract', 'resume_match'):
+            choice = request.metadata.get('runtime_choice')
+            if choice not in ('local_only', 'cloud_only'):
+                raise ValueError('Choose Local or Cloud for resume processing.')
+            if choice == 'cloud_only' and local_only:
+                raise ValueError('Cloud execution is forbidden by the current privacy policy.')
+            mode = choice
         if mode == 'ask_every_time':
             mode = request.metadata.get('runtime_choice')
             if mode not in ('local_only', 'cloud_only'):

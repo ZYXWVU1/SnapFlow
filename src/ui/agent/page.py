@@ -36,6 +36,7 @@ class AgentPage(ScrollPage):
     version_open_requested = Signal(str)
     enable_requested = Signal()
     desktop_context_requested = Signal()
+    browser_context_requested = Signal()
 
     def __init__(self, memory_store=None, parent=None):
         super().__init__(parent)
@@ -76,6 +77,11 @@ class AgentPage(ScrollPage):
         desktop_button = AppButton('Manage Desktop Context', variant='secondary')
         desktop_button.clicked.connect(self.desktop_context_requested)
         goal_card.content.addWidget(desktop_button)
+        self.include_browser = QCheckBox('Include reviewed browser page (plan/output temporary until Clear/Stop)')
+        goal_card.content.addWidget(self.include_browser)
+        browser_button = AppButton('Manage Browser Companion', variant='secondary')
+        browser_button.clicked.connect(self.browser_context_requested)
+        goal_card.content.addWidget(browser_button)
         goal_card.content.addWidget(self._label('Select up to eight saved memories. Only checked records are included.'))
         self.memory_query = QLineEdit()
         self.memory_query.setPlaceholderText('Find saved memories to select…')
@@ -194,7 +200,7 @@ class AgentPage(ScrollPage):
         self.goal.textChanged.connect(self._invalidate_review)
         self.mode.currentIndexChanged.connect(self._invalidate_review)
         self.plan_editor.textChanged.connect(self._invalidate_review)
-        for checkbox in (self.include_current, self.include_conversation, self.include_desktop, self.limit_cost, *self.permissions.values()):
+        for checkbox in (self.include_current, self.include_conversation, self.include_desktop, self.include_browser, self.limit_cost, *self.permissions.values()):
             checkbox.toggled.connect(self._invalidate_review)
         for editor in (*self.budgets.values(), self.max_estimated_cost):
             editor.valueChanged.connect(self._invalidate_review)
@@ -361,7 +367,8 @@ class AgentPage(ScrollPage):
             'constraints': constraints, 'selected_memory_ids': self.selected_memory_ids(),
             'include_current': self.include_current.isChecked(),
             'include_conversation': self.include_conversation.isChecked(),
-            'include_desktop': self.include_desktop.isChecked()}
+            'include_desktop': self.include_desktop.isChecked(),
+            'include_browser': self.include_browser.isChecked()}
 
     def set_versions(self, plans, current_plan_id, selected_plan_id=None):
         self.version_selector.blockSignals(True)

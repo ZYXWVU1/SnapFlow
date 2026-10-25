@@ -34,6 +34,11 @@ OPTIONAL_GATES = ('cloud_ai', 'soak_2h', 'manual_accessibility', 'sleep_resume')
 AGENT_REQUIRED_GATES = ('agent_planning', 'agent_execution', 'agent_recovery',
                         'agent_privacy', 'agent_approval', 'agent_no_duplicate_effects',
                         'agent_evaluation', 'agent_backup_restore', 'agent_package_smoke')
+# Browser qualification is additive; a desktop/Agent PASS cannot qualify web work.
+BROWSER_REQUIRED_GATES = ('browser_read_only', 'browser_controlled_actions', 'browser_teach',
+                          'browser_agent', 'browser_security', 'browser_stop_recovery',
+                          'browser_chrome_e2e', 'browser_edge_e2e', 'browser_package_smoke',
+                          'browser_installer_lifecycle', 'browser_performance')
 MAXIMUM_SUPPORTED_UPGRADE_FROM = '0.8.0-beta.1'
 SHA256_RE = re.compile(r'[0-9a-f]{64}')
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
@@ -82,6 +87,19 @@ def source_fingerprint(root):
                     checked = _safe_path(root, path.relative_to(root))
                     if checked.is_file():
                         candidates.add(checked)
+    # The extension is an executable part of the candidate. Include its source,
+    # fixtures, manifest, assets and builder inputs, but never generated bundles
+    # or installed dependencies. Otherwise changed DOM/permission code could
+    # reuse evidence from a different browser candidate.
+    extension = _safe_path(root, 'browser-extension')
+    if extension.exists():
+        generated = {'dist', 'build', 'node_modules', '__pycache__', '.cache', '.git'}
+        for path in extension.rglob('*'):
+            if any(part in generated for part in path.relative_to(extension).parts):
+                continue
+            checked = _safe_path(root, path.relative_to(root))
+            if checked.is_file():
+                candidates.add(checked)
     workflow = _safe_path(root, '.github/workflows/phase13-release.yml')
     if workflow.is_file():
         candidates.add(workflow)
@@ -253,5 +271,29 @@ def evaluate_agent_release_gates(evidence, fingerprint, *, now=None, max_age_hou
     statuses = [gate['status'] for gate in gates.values()]
     status = 'FAIL' if 'FAIL' in statuses else 'NOT VERIFIED' if 'NOT VERIFIED' in statuses else 'PASS'
     return {'schema_version': 1, 'qualification': 'agent', 'version': APP_VERSION,
+            'channel': RELEASE_CHANNEL, 'source_fingerprint': fingerprint,
+            'generated_at': now.isoformat(), 'status': status, 'gates': gates}
+
+
+def evaluate_browser_release_gates(evidence, fingerprint, *, now=None, max_age_hours=72, evidence_root=None):
+    """Require explicit source-bound evidence for each browser release milestone.
+
+    This validates evidence records, not the executions they describe. Owned DOM
+    fixtures, mocked inference and host-only tests must not be recorded as real
+    installed-browser, installer or provider acceptance. Missing evidence stays
+    NOT VERIFIED; this evaluator never manufactures qualification from legacy
+    desktop or Agent gates.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None or not math.isfinite(max_age_hours) or max_age_hours <= 0:
+        raise ValueError('Use a timezone-aware clock and a positive evidence lifetime.')
+    evidence = evidence if isinstance(evidence, dict) else {}
+    entries = evidence.get('gates', {})
+    entries = entries if isinstance(entries, dict) else {}
+    gates = {name: dict(_gate_result(name, entries.get(name), fingerprint, now,
+        timedelta(hours=max_age_hours), evidence_root), required=True) for name in BROWSER_REQUIRED_GATES}
+    statuses = [gate['status'] for gate in gates.values()]
+    status = 'FAIL' if 'FAIL' in statuses else 'NOT VERIFIED' if 'NOT VERIFIED' in statuses else 'PASS'
+    return {'schema_version': 1, 'qualification': 'browser', 'version': APP_VERSION,
             'channel': RELEASE_CHANNEL, 'source_fingerprint': fingerprint,
             'generated_at': now.isoformat(), 'status': status, 'gates': gates}

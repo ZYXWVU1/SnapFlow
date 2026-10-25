@@ -39,6 +39,7 @@ _FIXED_MEMBERS = {
     "integrations/mcp_connections.json": "integrations",
     "databases/learning.sqlite3": "evaluation",
     "databases/agent_missions.sqlite3": "agent",
+    "databases/resume_autofill.sqlite3": "resume",
 }
 _CATEGORY_TARGETS = {
     "settings": ("config_file", "model_records_file", "beta_features_file"),
@@ -48,6 +49,7 @@ _CATEGORY_TARGETS = {
     "integrations": ("integrations_file", "mcp_connections_file"),
     "evaluation": ("learning_database",),
     "agent": ("agent_database",),
+    "resume": ("resume_database",),
     "examples": ("verified_images_dir",),
     "memory": ("memory_images_dir",),
 }
@@ -95,7 +97,7 @@ class BackupService:
         except ValueError as exc:
             raise ValueError("Backup service needs a valid Semantic Version.") from exc
 
-    def _source_files(self, temporary_root):
+    def _source_files(self, temporary_root, categories=None):
         items = []
         fixed_sources = (
             ("settings", "config/config.json", self.paths.config_file, "file"),
@@ -109,8 +111,11 @@ class BackupService:
             ("integrations", "integrations/mcp_connections.json", self.paths.mcp_connections_file, "file"),
             ("evaluation", "databases/learning.sqlite3", self.paths.learning_database, "sqlite"),
             ("agent", "databases/agent_missions.sqlite3", self.paths.agent_database, "agent_sqlite"),
+            ("resume", "databases/resume_autofill.sqlite3", self.paths.resume_database, "resume_sqlite"),
         )
         for category, member, source, kind in fixed_sources:
+            if categories is not None and category not in categories:
+                continue
             if not source.exists():
                 continue
             if not _regular_file(source):
@@ -120,10 +125,13 @@ class BackupService:
                 payload = backup_sqlite_database(source, temporary_root / "learning.sqlite3")
             elif kind == "agent_sqlite":
                 payload = _backup_agent_database(source, temporary_root / 'agent_missions.sqlite3')
+            elif kind == "resume_sqlite":
+                from src.resume.storage import backup_database
+                payload = backup_database(source, temporary_root / 'resume_autofill.sqlite3')
             items.append((category, member, payload))
 
         image_dir = self.paths.verified_images_dir
-        if image_dir.exists():
+        if (categories is None or 'examples' in categories) and image_dir.exists():
             if image_dir.is_symlink() or not image_dir.is_dir():
                 raise BackupError("The verified examples path is not a regular directory.")
             for image in sorted(image_dir.rglob("*")):
@@ -137,7 +145,7 @@ class BackupService:
                     raise BackupError("An example filename cannot be represented safely in a backup.")
                 items.append(("examples", member, image))
         memory_dir = self.paths.memory_images_dir
-        if memory_dir.exists():
+        if (categories is None or 'memory' in categories) and memory_dir.exists():
             if memory_dir.is_symlink() or not memory_dir.is_dir():
                 raise BackupError('The Visual Memory images path is not a regular directory.')
             for image in sorted(memory_dir.iterdir()):
@@ -145,7 +153,7 @@ class BackupService:
                     raise BackupError('Refusing to back up a symbolic link in Visual Memory.')
                 if image.is_file() and re.fullmatch(r'[0-9a-f]{32}(?:-thumb)?\.png', image.name):
                     items.append(('memory', f'memory/images/{image.name}', image))
-        return items
+        return [item for item in items if categories is None or item[0] in categories]
 
     def _check_destination(self, destination):
         if destination.is_symlink():
@@ -162,6 +170,7 @@ class BackupService:
             self.paths.integrations_file,
             self.paths.learning_database,
             self.paths.agent_database,
+            self.paths.resume_database,
             self.paths.legacy_data_dir / "custom_skills.json",
             self.paths.legacy_data_dir / "workflows.json",
             self.paths.legacy_data_dir / "workflow_history.json",
@@ -191,7 +200,19 @@ class BackupService:
             except ValueError as exc:
                 raise BackupError("Choose a backup under the backup folder or outside SnapFlow's data folder.") from exc
 
-    def export_backup(self, destination):
+    def export_backup(self, destination, categories=None, *, include_resume=False):
+        # Resume material is an explicitly selected personal-data category.
+        # Existing callers retain their previous exports without adding it.
+        if type(include_resume) is not bool:
+            raise BackupError('Choose whether to include personal resume data.')
+        if categories is None:
+            categories = set(_CATEGORY_TARGETS) - {'resume'}
+        elif not isinstance(categories, (list, tuple, set, frozenset)) or any(
+                type(category) is not str or category not in _CATEGORY_TARGETS for category in categories):
+            raise BackupError('Choose recognized backup categories.')
+        categories = set(categories)
+        if include_resume:
+            categories.add('resume')
         destination = Path(destination).expanduser()
         self._check_destination(destination)
         if destination.exists() and destination.is_dir():
@@ -201,7 +222,7 @@ class BackupService:
         self.paths.cache_dir.mkdir(parents=True, exist_ok=True)
         try:
             with tempfile.TemporaryDirectory(prefix="snapflow-export-", dir=self.paths.cache_dir) as work:
-                items = self._source_files(Path(work))
+                items = self._source_files(Path(work), categories)
                 records = []
                 with zipfile.ZipFile(temporary_archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                     for category, member, source in items:
@@ -348,6 +369,11 @@ class BackupService:
                     _validate_agent_database(agent_stage)
                     _sanitize_agent_database(agent_stage)
 
+                resume_stage = stage_root / 'databases' / 'resume_autofill.sqlite3'
+                if resume_stage.exists():
+                    from src.resume.storage import validate_database
+                    validate_database(resume_stage)
+
                 return BackupInspection(app_version, created_at, tuple(sorted(categories)),
                                         len(records), total)
         except BackupError:
@@ -464,6 +490,8 @@ class BackupService:
             return self.paths.learning_database
         if member == 'databases/agent_missions.sqlite3':
             return self.paths.agent_database
+        if member == 'databases/resume_autofill.sqlite3':
+            return self.paths.resume_database
         if _safe_member_category(member) == "examples":
             return self.paths.verified_images_dir.joinpath(*PurePosixPath(member).parts[2:])
         if _safe_member_category(member) == 'memory':
@@ -472,8 +500,9 @@ class BackupService:
 
     def _category_targets(self, category):
         targets = [getattr(self.paths, name) for name in _CATEGORY_TARGETS[category]]
-        if category in ('evaluation', 'agent'):
-            database = self.paths.learning_database if category == 'evaluation' else self.paths.agent_database
+        if category in ('evaluation', 'agent', 'resume'):
+            database = {'evaluation': self.paths.learning_database, 'agent': self.paths.agent_database,
+                        'resume': self.paths.resume_database}[category]
             targets.extend(Path(str(database) + suffix) for suffix in ('-wal', '-shm', '-journal'))
         return targets
 
@@ -500,7 +529,8 @@ class BackupService:
                 if not inspection.categories:
                     raise BackupError("This backup contains no application data to restore.")
 
-                current_backup = self.export_backup(self._before_restore_path())
+                current_backup = self.export_backup(self._before_restore_path(),
+                    categories=set(_CATEGORY_TARGETS) if 'resume' in inspection.categories else None)
                 rollback_root = work_root / "rollback"
                 moved = []
                 installed = []

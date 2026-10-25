@@ -35,7 +35,7 @@ class AgentMissionService:
         return [{'source_id': s.source_id, 'type': s.source_type, 'memory_id': s.memory_id,
             'revision': s.memory_revision, 'capture': s.screenshot_reference, 'hash': digest(s.content)} for s in bundle.sources]
 
-    def create(self, payload, *, cancelled=None, conversation=(), external_sources=(), desktop_sources=()):
+    def create(self, payload, *, cancelled=None, conversation=(), external_sources=(), desktop_sources=(), browser_sources=()):
         self.safety_policy.require('agent_execution')
         if type(payload) is not dict or type(payload.get('goal')) is not str:
             raise ValueError('Enter a goal to create a mission.')
@@ -53,10 +53,11 @@ class AgentMissionService:
             execution_mode=payload.get('execution_mode', payload.get('mode', 'guided')),
             user_constraints=tuple(payload.get('user_constraints', ())),
             privacy_mode='private' if self._private() else 'local_only' if not constraints.allow_remote_ai else 'standard')
-        if desktop_sources and not callable(getattr(self.store, 'enable_temporary', None)):
-            raise ValueError('Desktop missions require temporary plan/output storage.')
+        temporary = bool(desktop_sources or browser_sources)
+        if temporary and not callable(getattr(self.store, 'enable_temporary', None)):
+            raise ValueError('Desktop and browser missions require temporary plan/output storage.')
         self.store.create_session(session)
-        if desktop_sources:
+        if temporary:
             self.store.enable_temporary(session.session_id)
         self.controls[session.session_id] = (Event(), Event())
         try:
@@ -65,20 +66,24 @@ class AgentMissionService:
                     self.services.screenshot_reference(), session.goal, selected_memory_ids=selected,
                     allow_search=constraints.allow_memory_search, conversation_history=conversation,
                     external_sources=external_sources, include_current=include_current,
-                    desktop_sources=desktop_sources, desktop_validator=self.services.desktop_validator)
+                    desktop_sources=desktop_sources, desktop_validator=self.services.desktop_validator,
+                    browser_sources=browser_sources, browser_validator=self.services.browser_validator)
             # Clear/Stop releases temporary sessions under this same lock, including
             # missions still assembling. Never publish a bundle after that release.
             with self.store.lock:
-                if desktop_sources:
+                if temporary:
                     if session.session_id in self.store.released_sessions:
-                        raise ValueError('Desktop Context was cleared during mission setup.')
+                        raise ValueError('Temporary Context was cleared during mission setup.')
+                if desktop_sources:
                     self.services.desktop_validator(desktop_sources)
+                if browser_sources:
+                    self.services.browser_validator(browser_sources)
                 if self.store.get_session(session.session_id).status == 'cancelled':
                     raise ValueError('Mission cancelled during setup.')
                 self.store.save_context(session.session_id, {'selected_memory_ids': list(selected),
                     'include_current': include_current, 'signature': self._signature(bundle),
                     'conversation_included': bool(conversation), 'external_included': bool(external_sources),
-                    'desktop_included': bool(desktop_sources)})
+                    'desktop_included': bool(desktop_sources), 'browser_included': bool(browser_sources)})
                 self.contexts[session.session_id] = bundle
                 self.store.update_session(session.session_id, status='planning')
             self.running_since[session.session_id] = time.monotonic()
@@ -95,7 +100,7 @@ class AgentMissionService:
             self._guard(session.session_id, bundle)
             self.store.add_plan(plan)
         except Exception:
-            if desktop_sources:
+            if temporary:
                 with self.store.lock:
                     self.contexts.pop(session.session_id, None)
                     self.store.clear_temporary(session.session_id)
@@ -141,7 +146,7 @@ class AgentMissionService:
     def _context(self, session):
         if session.session_id not in self.contexts:
             metadata = self.store.context(session.session_id)
-            if metadata['conversation_included'] or metadata['external_included'] or metadata.get('desktop_included'):
+            if metadata['conversation_included'] or metadata['external_included'] or metadata.get('desktop_included') or metadata.get('browser_included'):
                 raise ValueError('Reselect conversation or external context before creating a new plan.')
             bundle = assemble_agent_context(self.services.memory_store, self.services.current_result(),
                 self.services.screenshot_reference(), session.goal,
@@ -205,6 +210,18 @@ class AgentMissionService:
         session = self.store.get_session(session_id)
         if session.current_plan_id:
             self.store.revoke(session.current_plan_id)
+
+    def release_browser_context(self, browser_session_id=None):
+        """Revoke affected missions before releasing all browser-derived RAM data."""
+        with self.store.lock:
+            for mission_id, bundle in tuple(self.contexts.items()):
+                sources = tuple(source for source in bundle.sources if source.source_type == 'browser_dom')
+                if not sources or browser_session_id is not None and not any(
+                        json.loads(source.content).get('browser_session_id') == browser_session_id for source in sources):
+                    continue
+                self.cancel(mission_id)
+                self.contexts.pop(mission_id, None)
+                self.store.clear_temporary(mission_id)
 
     def _check_revision(self, old, new, registry):
         states = self.store.step_states(old.plan_id)
