@@ -4,6 +4,7 @@ import threading
 import time
 
 _outstanding = threading.BoundedSemaphore(4)
+_DEADLINE_SETTLE_SECONDS = 0.5
 
 
 class _Admission:
@@ -15,10 +16,10 @@ class _Admission:
 
     @staticmethod
     def check(cancelled, deadline):
-        if cancelled():
-            raise ValueError('AI request cancelled.')
         if time.monotonic() >= deadline:
             raise ValueError('AI request timed out.')
+        if cancelled():
+            raise ValueError('AI request cancelled.')
 
     def acquire(self, background, cancelled, deadline):
         with self.condition:
@@ -75,10 +76,22 @@ def run_cancellable(operation, cancelled=None, timeout=120, *, background=False)
         _admission.release(background)
         raise
     while True:
+        if time.monotonic() >= deadline:
+            # Deadline-aware transports need a short bounded window to finish
+            # cancellation and record their terminal request event. Returning
+            # first would snapshot evaluator usage before that callback runs.
+            # Only wait when the caller's scoped cancellation signal confirms
+            # deadline-aware cancellation; ordinary work must retain the
+            # wrapper's prompt timeout bound.
+            if cancelled() and finished.wait(_DEADLINE_SETTLE_SECONDS):
+                try:
+                    future.result()
+                except BaseException:
+                    raise
+                raise ValueError('AI request timed out.')
+            raise ValueError('AI request timed out.')
         if cancelled():
             raise ValueError('AI request cancelled.')
         if future.done():
             return future.result()
-        if time.monotonic() >= deadline:
-            raise ValueError('AI request timed out.')
         finished.wait(min(.02, max(0, deadline - time.monotonic())))

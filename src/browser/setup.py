@@ -6,8 +6,8 @@ import sys
 
 from src.beta.flags import require_plain_path
 from .protocol import HOST_NAME
-from .registration import (WindowsRegistry, read_host_manifest, registration_plan,
-                           remove_registration)
+from .registration import (REGISTRY_PATHS, WindowsRegistry, read_host_manifest,
+                           registration_plan, remove_registration)
 
 
 def unregister_owned(host, registry):
@@ -20,8 +20,13 @@ def unregister_owned(host, registry):
     target = require_plain_path(host.with_name(HOST_NAME + '.json'))
     if not target.exists():
         return ()
+    manifest = str(target.resolve())
+    chrome_owned = registry.get(REGISTRY_PATHS['chrome']) == manifest
+    edge_owned = registry.get(REGISTRY_PATHS['edge']) == manifest
+    if not chrome_owned and not edge_owned:
+        return ()
     read_host_manifest(target, host)  # Malformed/mismatched ownership fails closed.
-    return remove_registration(registration_plan(target, chrome=True, edge=True), registry)
+    return remove_registration(registration_plan(target, chrome=chrome_owned, edge=edge_owned), registry)
 
 
 def main(argv=None):

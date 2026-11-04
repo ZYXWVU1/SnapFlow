@@ -270,7 +270,8 @@ class SettingsPage(ScrollPage):
         self.ai_runtime_label.setText(
             f'AI execution: {execution} · Private Mode {"on" if private else "off"}')
         self.privacy_note.setText(
-            'Private Mode: external network access and cloud fallback are blocked. AI content stays on this computer.'
+            ('Private Mode: SnapFlow remote requests and cloud fallback are blocked. AI requests stay on this computer. '
+             'Local stdio MCP processes and browser pages may still use their own network access.')
             if private else 'Screenshots are kept in memory. AI requests use the configured execution policy; cloud requests send selected content to your provider. Workflow History stores status only.')
         self.theme_label.setText(config.theme.title())
         self.memory_status.setText(

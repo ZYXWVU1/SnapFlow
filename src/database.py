@@ -22,9 +22,9 @@ class DatabaseMigrationResult:
 def backup_sqlite_database(source, destination):
     """Create an integrity-checked SQLite snapshot, including committed WAL data."""
     source, destination = Path(source), Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     source_db = destination_db = None
     try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         source_db = sqlite3.connect(source)
         destination_db = sqlite3.connect(destination)
         source_db.backup(destination_db)

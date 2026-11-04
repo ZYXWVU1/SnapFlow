@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import zipfile
 from uuid import uuid4
@@ -47,6 +48,18 @@ def _must_refuse(function, errors=(PermissionError, ValueError)):
     except errors:
         return
     raise AssertionError('An authorization boundary accepted an unsafe operation.')
+
+
+def _smoke_error_summary(exc):
+    """Keep opt-in smoke failures useful without retaining profile paths or secrets."""
+    from src.diagnostics import redact_text
+    message = redact_text(f'{type(exc).__name__}: {exc}')
+    for key in ('APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOME', 'TEMP', 'TMP',
+                'SNAPFLOW_PHASE18_PROFILE'):
+        profile = os.environ.get(key, '').strip()
+        if profile:
+            message = re.sub(re.escape(profile), '<DISPOSABLE_PROFILE>', message, flags=re.IGNORECASE)
+    return message[:500]
 
 
 def run_safety_checks(paths):
@@ -182,6 +195,7 @@ def run_packaged_browser_smoke(app, owner):
     except Exception as exc:
         report['status'] = 'FAIL'
         report['error_type'] = type(exc).__name__
+        report['error'] = _smoke_error_summary(exc)
     finally:
         owner.paths.data_dir.joinpath('phase18_smoke.json').write_text(
             json.dumps(report, indent=2), encoding='utf8')

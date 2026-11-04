@@ -10,6 +10,10 @@ import uuid
 from src.database import initialize_learning_database
 
 
+FAILURE_CATEGORIES = frozenset((
+    'timeout', 'connection', 'http_3xx', 'http_400', 'http_401', 'http_403', 'http_404',
+    'http_4xx_other', 'http_429', 'http_5xx', 'http_other', 'request_error'))
+
 # OpenAI published rates per million tokens for gpt-4.1-mini. Verified 2026-09-26:
 # https://developers.openai.com/api/docs/models/gpt-4.1-mini
 _GPT_41_MINI_RATE = (0.40, 0.10, 1.60)  # uncached input, cached input, output
@@ -71,9 +75,7 @@ class UsageEvent:
             raise ValueError("Cached input tokens cannot exceed total input tokens.")
         if type(self.succeeded) is not bool or type(self.usage_available) is not bool:
             raise ValueError("Usage request state is invalid.")
-        if self.failure_category is not None and self.failure_category not in (
-                "timeout", "connection", "http_400", "http_401", "http_403", "http_404",
-                "http_429", "http_other", "request_error"):
+        if self.failure_category is not None and self.failure_category not in FAILURE_CATEGORIES:
             raise ValueError("Usage failure category is invalid.")
         try:
             parsed_timestamp = datetime.fromisoformat(self.timestamp)

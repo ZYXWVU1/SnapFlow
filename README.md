@@ -132,13 +132,15 @@ Local reliability records and support exports can help diagnose problems. SnapFl
 
 ## Development
 
-With dependencies installed, run these checks from the project folder:
+With dependencies installed, run these checks from the project folder. The Python suite uses one process per module because its Qt tests create different application lifetimes; running `unittest discover` in one process can stall or report harness errors.
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe -m compileall -q main.py src tests
-.\.venv\Scripts\python.exe main.py --smoke-test
+.\.build-venv\Scripts\python.exe scripts\run_optimization_regression.py --output build\test-results\python.json
+node --test --test-isolation=none browser-extension/tests/*.test.js
+.\.build-venv\Scripts\python.exe -m compileall -q main.py src tests
 ```
+
+Run `main.py --smoke-test` only with a new disposable Windows profile: startup performs data migration and constructs the regular application controller. Keep the profile in Private Mode with cloud fallback disabled; do not use the normal SnapFlow data directory for a smoke run.
 
 ## Limitations
 

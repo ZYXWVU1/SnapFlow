@@ -73,10 +73,10 @@ class _Loop:
             try:
                 if state.get('abort'):
                     raise asyncio.CancelledError()
-                if cancelled and cancelled():
-                    raise ValueError('AI request cancelled.')
                 if deadline is not None and time.monotonic() >= deadline:
                     raise TimeoutError()
+                if cancelled and cancelled():
+                    raise ValueError('AI request cancelled.')
                 if deadline is None:
                     state['result'] = await operation()
                 else:
@@ -100,10 +100,10 @@ class _Loop:
         while not done.wait(.01):
             if reason is None:
                 try:
-                    if cancelled and cancelled():
-                        reason = 'cancelled'
-                    elif deadline is not None and time.monotonic() >= deadline:
+                    if deadline is not None and time.monotonic() >= deadline:
                         reason = 'timed out'
+                    elif cancelled and cancelled():
+                        reason = 'cancelled'
                 except BaseException as exc:
                     callback_error, reason = exc, 'cancelled'
                 if reason:
@@ -112,10 +112,10 @@ class _Loop:
                     self.loop.call_soon_threadsafe(lambda: state['task'].cancel())
         if reason is None:
             try:
-                if cancelled and cancelled():
-                    reason = 'cancelled'
-                elif deadline is not None and time.monotonic() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     reason = 'timed out'
+                elif cancelled and cancelled():
+                    reason = 'cancelled'
             except BaseException as exc:
                 callback_error, reason = exc, 'cancelled'
         if reason and 'result' in state and discard is not None:
@@ -185,10 +185,10 @@ class DeadlineTransport(httpx.BaseTransport):
 
     def handle_request(self, request):
         deadline, cancelled = self.scope()
-        if cancelled and cancelled():
-            raise ValueError('AI request cancelled.')
         if deadline is not None and time.monotonic() >= deadline:
             raise httpx.ReadTimeout('AI request timed out.', request=request)
+        if cancelled and cancelled():
+            raise ValueError('AI request cancelled.')
         # AI requests have materialized JSON bodies. ByteStream implements both
         # public stream interfaces, unlike a synchronous SDK request iterator.
         forwarded = httpx.Request(request.method, request.url, headers=request.headers,

@@ -35,6 +35,7 @@ def resize_if_needed(image: QImage, max_width: int = 1920) -> QImage:
 def image_to_png_bytes(image: QImage) -> bytes:
     buffer = QBuffer()
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-    if image.isNull() or not image.save(buffer, "PNG"):
+    # PNG remains lossless; the explicit profile reduces CPU time at modest size cost.
+    if image.isNull() or not image.save(buffer, "PNG", 75):
         raise ValueError("Unable to encode screenshot.")
     return bytes(buffer.data())

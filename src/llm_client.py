@@ -57,6 +57,20 @@ def _request_timeout(base_url: str) -> float:
     return max(10.0, min(value, 600.0))
 
 
+def _http_status_failure_category(status) -> str:
+    if status in (400, 401, 403, 404, 429):
+        return f'http_{status}'
+    if type(status) is not int:
+        return 'http_other'
+    if 300 <= status < 400:
+        return 'http_3xx'
+    if 400 <= status < 500:
+        return 'http_4xx_other'
+    if 500 <= status < 600:
+        return 'http_5xx'
+    return 'http_other'
+
+
 class LLMClient:
     def __init__(self, usage_callback=None, *, on_usage=None, config=None, policy=None,
                  runtime_choice=None, routing_callback=None, performance_store=None, paths=None):
@@ -369,8 +383,7 @@ class LLMClient:
             elif isinstance(failure, APIConnectionError):
                 failure_category = 'connection'
             elif isinstance(failure, APIStatusError):
-                status = failure.status_code
-                failure_category = f'http_{status}' if status in (400, 401, 403, 404, 429) else 'http_other'
+                failure_category = _http_status_failure_category(failure.status_code)
             else:
                 failure_category = 'request_error'
         try:
@@ -402,6 +415,7 @@ class LLMClient:
         if system_prompt:
             messages.append({'role': 'system', 'content': system_prompt})
         messages.append({'role': 'user', 'content': prompt})
+        usage_recorded = False
         try:
             with self._cloud_client(key, base_url,
                     _request_timeout(base_url) if timeout_seconds is None else timeout_seconds, cancelled, deadline) as client:
@@ -410,6 +424,7 @@ class LLMClient:
                     max_tokens=_output_budget(max_output_tokens))
             self._record_usage(response, model=model, base_url=base_url,
                                operation=usage_operation or 'text', started=started)
+            usage_recorded = True
             if not response.choices or not response.choices[0].message.content:
                 raise AnalysisError('The AI service returned an empty proposal.')
             if (usage_operation == 'resume_extract' and
@@ -436,6 +451,12 @@ class LLMClient:
             }
             message = messages.get(exc.status_code, f'AI service error (HTTP {exc.status_code}).')
             raise AnalysisError(message) from None
+        except Exception:
+            if not usage_recorded:
+                self._record_usage(None, model=model, base_url=base_url,
+                                   operation=usage_operation or 'text', started=started,
+                                   failure=RuntimeError())
+            raise
 
     def test_connection(self, *, api_key: str, base_url: str, model: str) -> bool:
         """Send one explicit, short text request to verify compatible chat access."""

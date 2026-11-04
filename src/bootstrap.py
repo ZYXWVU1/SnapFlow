@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 from src.app_version import APP_NAME
+from src.network_policy import NetworkPolicyError
 
 
 REQUIRED_MODULES = {
@@ -46,6 +47,23 @@ def _running_in_virtual_environment() -> bool:
         sys.prefix != getattr(sys, "base_prefix", sys.prefix)
         or sys.prefix != getattr(sys, "real_prefix", sys.prefix)
     )
+
+
+def _configure_dependency_network_policy():
+    """Load the saved policy before source-mode startup can install packages."""
+    try:
+        from src.config import load_config
+        from src.network_policy import get_network_policy
+        from src.paths import AppPaths
+
+        config = load_config(AppPaths().config_file)
+        policy = get_network_policy()
+        policy.set_private_mode(config.private_mode)
+        return policy
+    except (ImportError, OSError, TypeError, ValueError):
+        raise DependencyError(
+            "Saved Private Mode could not be verified; automatic dependency installation was stopped."
+        ) from None
 
 
 def _install_dependencies(requirements_file: Path, missing: list[str]) -> None:
@@ -110,6 +128,18 @@ def ensure_dependencies() -> None:
     missing = _missing_modules()
     if not missing:
         return
+
+    policy = _configure_dependency_network_policy()
+    try:
+        # Package index selection is owned by pip and may be overridden by its
+        # environment/config. Treat automatic resolution as an external request.
+        policy.require_allowed('https://pypi.org/simple', 'dependency_install',
+            contains_user_content=False)
+    except NetworkPolicyError:
+        raise DependencyError(
+            "Private Mode blocked automatic installation of the missing Python packages. "
+            "No package request was sent."
+        ) from None
 
     requirements_file = Path(__file__).resolve().parents[1] / "requirements.txt"
     if not requirements_file.is_file():

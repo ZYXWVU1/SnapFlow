@@ -111,7 +111,7 @@ class AIRuntimeDialog(QDialog):
             getattr(config, 'ai_execution_mode', 'cloud_only')))
         self.execution_mode.setAccessibleName('AI execution mode')
         form.addRow('Execution mode', self.execution_mode)
-        self.private_mode = QCheckBox('Private Mode — block external network access')
+        self.private_mode = QCheckBox('Private Mode — block SnapFlow remote requests')
         self.private_mode.setChecked(getattr(config, 'private_mode', False))
         form.addRow(self.private_mode)
         self.allow_cloud_fallback = QCheckBox('Allow cloud fallback if local inference fails')
@@ -289,7 +289,8 @@ class AIRuntimeDialog(QDialog):
         private = self.private_mode.isChecked()
         self.allow_cloud_fallback.setEnabled(not private)
         if private:
-            text = 'Private Mode active: external network access is blocked. AI requests must stay on this computer; cloud fallback is blocked.'
+            text = ('Private Mode active: SnapFlow remote requests are blocked. AI requests stay on this computer; '
+                    'cloud fallback is blocked. Local stdio MCP processes and browser pages may still use their own network access.')
         elif self.execution_mode.currentData() == 'local_only':
             text = 'Local Only: AI requests stay on the local runtime. Private Mode is off, so other authorized integrations can still use the network.'
         elif self.execution_mode.currentData() == 'cloud_only':

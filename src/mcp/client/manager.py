@@ -241,6 +241,7 @@ class MCPClientManager:
                         break
                     if active_response.cancelled():
                         continue
+                    close_transport = False
                     try:
                         self._active_operations[connection_id] = {'operation': operation,
                             'target': args[0] if args else '', 'interactions': 0,
@@ -249,14 +250,18 @@ class MCPClientManager:
                             'fingerprint': args[3] if operation == 'tool' else None}
                         async with asyncio.timeout(max(120, profile.timeout_seconds) if self.interaction_handler else profile.timeout_seconds):
                             result = await self._operate(profile, client, operation, args)
+                        close_transport = getattr(result, 'category', '') == 'transport'
                         if not active_response.done():
                             active_response.set_result(result)
                     except Exception as exc:
+                        close_transport = self._is_connection_closed(exc)
                         if not active_response.done():
                             active_response.set_exception(ValueError(self._safe_error(exc)))
                     finally:
                         self._active_operations.pop(connection_id, None)
                     active_response = None
+                    if close_transport:
+                        break
         except asyncio.CancelledError:
             if not ready.done():
                 ready.cancel()
@@ -281,6 +286,14 @@ class MCPClientManager:
                 _, _, response = queue.get_nowait()
                 if not response.done():
                     response.set_exception(ValueError('MCP connection closed.'))
+
+    @staticmethod
+    def _is_connection_closed(exc):
+        from mcp.shared.exceptions import MCPError
+        from mcp_types import CONNECTION_CLOSED
+        if isinstance(exc, BaseExceptionGroup):
+            return any(MCPClientManager._is_connection_closed(item) for item in exc.exceptions)
+        return isinstance(exc, MCPError) and exc.code == CONNECTION_CLOSED
 
     @staticmethod
     def _safe_error(exc):
@@ -408,7 +421,9 @@ class MCPClientManager:
                     finish_write('unknown')
                 except Exception:
                     pass
-                return InvocationResult(False, self._safe_error(exc), category='timeout' if isinstance(exc, TimeoutError) else 'transport',
+                category = ('timeout' if isinstance(exc, TimeoutError) else
+                    'transport' if self._is_connection_closed(exc) else 'tool_error')
+                return InvocationResult(False, self._safe_error(exc), category=category,
                     duration_seconds=time.monotonic() - start)
             try:
                 finish_write('unknown' if raw.is_error else 'completed')
